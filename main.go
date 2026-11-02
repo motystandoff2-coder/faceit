@@ -634,10 +634,11 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // ── /setup ──────────────────────────────────────────────────────────────
 
 func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	// Сразу отвечаем — канал ещё существует
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: "⏳ Полностью пересоздаю структуру сервера...",
+			Content: "⏳ Настройка запущена. Каналы будут созданы через несколько секунд...",
 			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
@@ -650,11 +651,14 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	// Всё остальное — в горутине, чтобы не блокировать и не падать при удалении канала
+	go func() {
 	// 1. Удалить все каналы
 	channels, _ := s.GuildChannels(guildID)
 	for _, ch := range channels {
 		_, _ = s.ChannelDelete(ch.ID)
 	}
+	time.Sleep(1 * time.Second)
 
 	// 2. Удалить старые роли бота
 	botRoleNames := map[string]bool{"No registred": true, "Registered": true, "Game Admin": true, "Ticket Admin": true}
@@ -867,7 +871,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: strPtr("✅ Настройка завершена! После регистрации выдаётся Default League.")})
+	log.Println("Setup complete for guild:", guildID)
+	}() // конец горутины
 }
 
 func strPtr(s string) *string { return &s }
