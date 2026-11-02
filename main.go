@@ -595,6 +595,19 @@ func buildMapSelectOptions(state *PickBanState) []discordgo.SelectMenuOption {
 // ── Interaction Handler ─────────────────────────────────────────────────
 
 func onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in interaction handler: %v", r)
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "❌ Внутренняя ошибка бота. Попробуй ещё раз.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
+			})
+		}
+	}()
+
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
 		handleCommand(s, i)
@@ -1222,20 +1235,72 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
+// getModalValue безопасно извлекает значение TextInput из модалки по customID поля
+func getModalValue(data discordgo.ModalSubmitInteractionData, customID string) string {
+	for _, row := range data.Components {
+		ar, ok := row.(*discordgo.ActionsRow)
+		if !ok {
+			continue
+		}
+		for _, comp := range ar.Components {
+			ti, ok := comp.(*discordgo.TextInput)
+			if ok && ti.CustomID == customID {
+				return ti.Value
+			}
+		}
+	}
+	return ""
+}
+
+func respondEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: content,
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+}
+
 // ── Modal Submit ────────────────────────────────────────────────────────
 
 func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.ModalSubmitData().CustomID == "modal_register" {
-		nick := i.ModalSubmitData().Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
-		gameID := i.ModalSubmitData().Components[1].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
-		uid, _ := getOrCreateUser(i.Member.User.ID, i.Member.User.Username)
+	data := i.ModalSubmitData()
 
-		_, _ = db.Exec("UPDATE users SET username = ?, game_nick = ?, game_id = ?, is_registered = 1 WHERE discord_id = ?", nick, nick, gameID, i.Member.User.ID)
+	if data.CustomID == "modal_register" {
+		nick   := getModalValue(data, "register_nick")
+		gameID := getModalValue(data, "register_game_id")
+
+		if nick == "" {
+			respondEphemeral(s, i, "❌ Ник не может быть пустым.")
+			return
+		}
+
+		uid, err := getOrCreateUser(i.Member.User.ID, i.Member.User.Username)
+		if err != nil {
+			log.Println("register getOrCreateUser error:", err)
+			respondEphemeral(s, i, "❌ Ошибка базы данных. Попробуй ещё раз.")
+			return
+		}
+
+		_, err = db.Exec(
+			"UPDATE users SET username = ?, game_nick = ?, game_id = ?, is_registered = 1 WHERE discord_id = ?",
+			nick, nick, gameID, i.Member.User.ID,
+		)
+		if err != nil {
+			log.Println("register db update error:", err)
+			respondEphemeral(s, i, "❌ Ошибка сохранения данных. Попробуй ещё раз.")
+			return
+		}
 
 		roles, _ := s.GuildRoles(i.GuildID)
 		for _, r := range roles {
 			if r.Name == "Default League" {
-				_ = s.GuildMemberRoleAdd(i.GuildID, i.Member.User.ID, r.ID)
+				if addErr := s.GuildMemberRoleAdd(i.GuildID, i.Member.User.ID, r.ID); addErr != nil {
+					log.Println("register add role error:", addErr)
+				}
 			}
 			if r.Name == "No registred" {
 				_ = s.GuildMemberRoleRemove(i.GuildID, i.Member.User.ID, r.ID)
@@ -1244,21 +1309,18 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 		guild, _ := s.Guild(i.GuildID)
 		if guild != nil && guild.OwnerID != i.Member.User.ID {
-			_ = s.GuildMemberNickname(i.GuildID, i.Member.User.ID, buildServerNick(uid, nick))
+			if nickErr := s.GuildMemberNickname(i.GuildID, i.Member.User.ID, buildServerNick(uid, nick)); nickErr != nil {
+				log.Println("register set nick error:", nickErr)
+			}
 		}
 
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("✅ Регистрация завершена! Ваш серверный ник: **%s**\n🆔 Игровой ID: **%s**", buildServerNick(uid, nick), gameID),
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		msg := fmt.Sprintf("✅ Регистрация завершена!\n🎮 Серверный ник: **%s**\n🆔 Игровой ID: **%s**\n\nТеперь тебе доступна Default League. Другие лиги открываются по роли.", buildServerNick(uid, nick), gameID)
+		respondEphemeral(s, i, msg)
 		return
 	}
 
-	if i.ModalSubmitData().CustomID == "modal_send_result" {
-		matchIDStr := i.ModalSubmitData().Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+	if data.CustomID == "modal_send_result" {
+		matchIDStr := getModalValue(data, "match_id_input")
 		matchID, err := strconv.Atoi(matchIDStr)
 		if err != nil {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
