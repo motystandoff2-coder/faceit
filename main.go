@@ -578,28 +578,40 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: "⏳ Начинаю настройку сервера...",
+			Content: "⏳ Удаляю старые каналы и пересоздаю сервер...",
 		},
 	})
 
 	guildID := i.GuildID
 
-	// Create roles
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{
-		Name: "No registred",
-	})
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{
-		Name: "Registered",
-	})
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{
-		Name: "Game Admin",
-	})
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{
-		Name: "Ticket Admin",
-	})
+	// ── ШАГ 1: Удалить ВСЕ существующие каналы (кроме того где написана команда)
+	channels, _ := s.GuildChannels(guildID)
+	for _, ch := range channels {
+		if ch.ID == i.ChannelID {
+			continue // не удалять канал где написали /setup
+		}
+		s.ChannelDelete(ch.ID)
+	}
 
-	// Create league categories in exact order from screenshots:
-	// Each lobby gets its own category with its own #ranked
+	// ── ШАГ 2: Удалить старые роли бота
+	roles, _ := s.GuildRoles(guildID)
+	for _, r := range roles {
+		if r.Name == "No registred" || r.Name == "Registered" || r.Name == "Game Admin" || r.Name == "Ticket Admin" {
+			s.GuildRoleDelete(guildID, r.ID)
+		}
+	}
+
+	// ── ШАГ 3: Создать роли
+	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "No registred"})
+	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Registered"})
+	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Game Admin"})
+	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Ticket Admin"})
+
+	// ── ШАГ 4: Создать лиги
+	// Порядок точно как на скринах:
+	// PRO LEAGUE Lobby 1, PRO LEAGUE Lobby 2, PRO LEAGUE Lobby 3,
+	// PRO REMASTERED Lobby 4, PRO REMASTERED Lobby 5,
+	// DIVISION LEAGUE Lobby 1 ... и т.д.
 	for _, league := range LeagueConfig {
 		for _, lobbyNum := range league.Lobbies {
 			catName := fmt.Sprintf("%s | %s", league.Emoji, league.Name)
@@ -613,51 +625,53 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				continue
 			}
 
-			// Create #ranked text channel
+			// #ranked
 			s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 				Name:     "ranked",
 				Type:     discordgo.ChannelTypeGuildText,
 				ParentID: cat.ID,
 			})
 
-			// Create voice Lobby N with user limit 10
+			// Lobby N (голос, лимит MIN_LOBBY_PLAYERS)
+			minPlayers := 10
+			if mp := os.Getenv("MIN_LOBBY_PLAYERS"); mp != "" {
+				if n, err2 := strconv.Atoi(mp); err2 == nil {
+					minPlayers = n
+				}
+			}
 			s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 				Name:      fmt.Sprintf("Lobby %d", lobbyNum),
 				Type:      discordgo.ChannelTypeGuildVoice,
 				ParentID:  cat.ID,
-				UserLimit: 10,
+				UserLimit: minPlayers,
 			})
 		}
 	}
 
-	// SEND RESULT'S category
+	// ── ШАГ 5: SEND RESULT'S
 	resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 		Name: "📍 | SEND RESULT'S",
 		Type: discordgo.ChannelTypeGuildCategory,
 	})
 
-	// отправить-результаты
 	sendResultsCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 		Name:     "📌│отправить-результаты",
 		Type:     discordgo.ChannelTypeGuildText,
 		ParentID: resultsCat.ID,
 	})
 
-	// история-игр
 	s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 		Name:     "📊│история-игр",
 		Type:     discordgo.ChannelTypeGuildText,
 		ParentID: resultsCat.ID,
 	})
 
-	// приоритет-игр
 	s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 		Name:     "📁│приоритет-игр",
 		Type:     discordgo.ChannelTypeGuildText,
 		ParentID: resultsCat.ID,
 	})
 
-	// обычный-рег
 	s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 		Name:     "📁│обычный-рег",
 		Type:     discordgo.ChannelTypeGuildText,
