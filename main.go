@@ -106,6 +106,7 @@ func main() {
 	session.AddHandler(onReady)
 	session.AddHandler(onInteraction)
 	session.AddHandler(onVoiceStateUpdate)
+	session.AddHandler(onGuildMemberAdd)
 
 	err = session.Open()
 	if err != nil {
@@ -138,6 +139,8 @@ func initDB() {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		discord_id TEXT UNIQUE NOT NULL,
 		username TEXT NOT NULL,
+		game_nick TEXT DEFAULT '',
+		game_id TEXT DEFAULT '',
 		is_registered INTEGER DEFAULT 0,
 		elo INTEGER DEFAULT 1000,
 		games INTEGER DEFAULT 0,
@@ -182,6 +185,10 @@ func initDB() {
 		kills INTEGER DEFAULT 0,
 		deaths INTEGER DEFAULT 0
 	)`)
+
+	// Upgrade existing databases safely
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN game_nick TEXT DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN game_id TEXT DEFAULT ''")
 }
 
 func getOrCreateUser(discordID, username string) (int, error) {
@@ -228,7 +235,25 @@ func onReady(s *discordgo.Session, r *discordgo.Ready) {
 		},
 		{
 			Name:        "register",
-			Description: "Зарегистрироваться в системе",
+			Description: "Открыть форму регистрации",
+		},
+		{
+			Name:        "nickname",
+			Description: "Изменить серверный и игровой ник",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "nick",
+					Description: "Новый игровой ник",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "game_id",
+					Description: "Новый игровой ID (необязательно)",
+					Required:    false,
+				},
+			},
 		},
 	}
 
@@ -241,6 +266,25 @@ func onReady(s *discordgo.Session, r *discordgo.Ready) {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+func buildServerNick(id int, nick string) string {
+	return fmt.Sprintf("#%d | %s", id, nick)
+}
+
+func onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
+	_, err := getOrCreateUser(m.User.ID, m.User.Username)
+	if err != nil {
+		return
+	}
+
+	roles, _ := s.GuildRoles(m.GuildID)
+	for _, r := range roles {
+		if r.Name == "No registred" {
+			_ = s.GuildMemberRoleAdd(m.GuildID, m.User.ID, r.ID)
+			break
+		}
+	}
+}
 
 // ── Voice State Update (lobby detection) ────────────────────────────────
 
@@ -268,8 +312,10 @@ func onVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
 	}
 	userID, _ := getOrCreateUser(v.UserID, member.User.Username)
 
-	// Set nickname to #ID | username
-	nick := fmt.Sprintf("#%d | %s", userID, member.User.Username)
+	// Set nickname to #ID | registered game nick
+	displayNick := member.User.Username
+	_ = db.QueryRow("SELECT COALESCE(NULLIF(game_nick, ''), username) FROM users WHERE discord_id = ?", v.UserID).Scan(&displayNick)
+	nick := buildServerNick(userID, displayNick)
 	guild, _ := s.Guild(v.GuildID)
 	if guild != nil && guild.OwnerID != v.UserID {
 		s.GuildMemberNickname(v.GuildID, v.UserID, nick)
@@ -569,6 +615,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleProfile(s, i)
 	case "register":
 		handleRegister(s, i)
+	case "nickname":
+		handleNickname(s, i)
 	}
 }
 
@@ -578,150 +626,170 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: "⏳ Удаляю старые каналы и пересоздаю сервер...",
+			Content: "⏳ Полностью пересоздаю структуру сервера...",
+			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
 
 	guildID := i.GuildID
-
-	// ── ШАГ 1: Удалить ВСЕ существующие каналы (кроме того где написана команда)
-	channels, _ := s.GuildChannels(guildID)
-	for _, ch := range channels {
-		if ch.ID == i.ChannelID {
-			continue // не удалять канал где написали /setup
+	minPlayers := 10
+	if mp := os.Getenv("MIN_LOBBY_PLAYERS"); mp != "" {
+		if n, err := strconv.Atoi(mp); err == nil && n > 0 {
+			minPlayers = n
 		}
-		s.ChannelDelete(ch.ID)
 	}
 
-	// ── ШАГ 2: Удалить старые роли бота
+	// 1. Удалить все каналы
+	channels, _ := s.GuildChannels(guildID)
+	for _, ch := range channels {
+		_, _ = s.ChannelDelete(ch.ID)
+	}
+
+	// 2. Удалить старые роли бота
 	roles, _ := s.GuildRoles(guildID)
 	for _, r := range roles {
 		if r.Name == "No registred" || r.Name == "Registered" || r.Name == "Game Admin" || r.Name == "Ticket Admin" {
-			s.GuildRoleDelete(guildID, r.ID)
+			_ = s.GuildRoleDelete(guildID, r.ID)
 		}
 	}
 
-	// ── ШАГ 3: Создать роли
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "No registred"})
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Registered"})
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Game Admin"})
-	s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Ticket Admin"})
+	// 3. Создать роли
+	noRegRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "No registred"})
+	registeredRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Registered"})
+	gameAdminRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Game Admin"})
+	ticketAdminRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Ticket Admin"})
 
-	// ── ШАГ 4: Создать лиги
-	// Порядок точно как на скринах:
-	// PRO LEAGUE Lobby 1, PRO LEAGUE Lobby 2, PRO LEAGUE Lobby 3,
-	// PRO REMASTERED Lobby 4, PRO REMASTERED Lobby 5,
-	// DIVISION LEAGUE Lobby 1 ... и т.д.
+	registeredRoleID := ""
+	gameAdminRoleID := ""
+	ticketAdminRoleID := ""
+	noRegRoleID := ""
+	if registeredRole != nil { registeredRoleID = registeredRole.ID }
+	if gameAdminRole != nil { gameAdminRoleID = gameAdminRole.ID }
+	if ticketAdminRole != nil { ticketAdminRoleID = ticketAdminRole.ID }
+	if noRegRole != nil { noRegRoleID = noRegRole.ID }
+
+	privateAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
+	privateDeny := int64(discordgo.PermissionViewChannel)
+	publicAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
+
+	// 4. Категория регистрации
+	registrationCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+		Name: "🪪 | REGISTRATION",
+		Type: discordgo.ChannelTypeGuildCategory,
+	})
+	if registrationCat != nil {
+		_ = s.ChannelPermissionSet(registrationCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, publicAllow, 0)
+		if noRegRoleID != "" {
+			_ = s.ChannelPermissionSet(registrationCat.ID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, publicAllow, 0)
+		}
+	}
+
+	registrationCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+		Name:     "🪪│регистрация",
+		Type:     discordgo.ChannelTypeGuildText,
+		ParentID: func() string { if registrationCat != nil { return registrationCat.ID }; return "" }(),
+	})
+	if registrationCh != nil {
+		regEmbed := &discordgo.MessageEmbed{
+			Title: "🪪 РЕГИСТРАЦИЯ",
+			Description: "Добро пожаловать! Для доступа к лигам нужно зарегистрироваться.\n\n**Что нужно указать**\n› Игровой ник\n› Игровой ID\n\nИгровой ID будет использоваться для хоста лобби, если ты станешь хостом матча.",
+			Color: 0x5865f2,
+		}
+		regComponents := []discordgo.MessageComponent{
+			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "Регистрация", Style: discordgo.SuccessButton, CustomID: "open_register", Emoji: &discordgo.ComponentEmoji{Name: "🪪"}},
+			}},
+		}
+		_, _ = s.ChannelMessageSendComplex(registrationCh.ID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{regEmbed}, Components: regComponents})
+	}
+
+	// 5. Лиги и лобби, скрытые от незарегистрированных
 	for _, league := range LeagueConfig {
 		for _, lobbyNum := range league.Lobbies {
 			catName := fmt.Sprintf("%s | %s", league.Emoji, league.Name)
-
-			cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-				Name: catName,
-				Type: discordgo.ChannelTypeGuildCategory,
-			})
-			if err != nil {
-				log.Println("Error creating category:", err)
+			cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: catName, Type: discordgo.ChannelTypeGuildCategory})
+			if err != nil || cat == nil {
 				continue
 			}
 
-			// #ranked
-			s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-				Name:     "ranked",
-				Type:     discordgo.ChannelTypeGuildText,
-				ParentID: cat.ID,
-			})
-
-			// Lobby N (голос, лимит MIN_LOBBY_PLAYERS)
-			minPlayers := 10
-			if mp := os.Getenv("MIN_LOBBY_PLAYERS"); mp != "" {
-				if n, err2 := strconv.Atoi(mp); err2 == nil {
-					minPlayers = n
-				}
+			_ = s.ChannelPermissionSet(cat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
+			if registeredRoleID != "" {
+				_ = s.ChannelPermissionSet(cat.ID, registeredRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
-			s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-				Name:      fmt.Sprintf("Lobby %d", lobbyNum),
-				Type:      discordgo.ChannelTypeGuildVoice,
-				ParentID:  cat.ID,
-				UserLimit: minPlayers,
-			})
+			if gameAdminRoleID != "" {
+				_ = s.ChannelPermissionSet(cat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+			}
+			if ticketAdminRoleID != "" {
+				_ = s.ChannelPermissionSet(cat.ID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+			}
+
+			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "ranked", Type: discordgo.ChannelTypeGuildText, ParentID: cat.ID})
+			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: fmt.Sprintf("Lobby %d", lobbyNum), Type: discordgo.ChannelTypeGuildVoice, ParentID: cat.ID, UserLimit: minPlayers})
 		}
 	}
 
-	// ── ШАГ 5: SEND RESULT'S
-	resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-		Name: "📍 | SEND RESULT'S",
-		Type: discordgo.ChannelTypeGuildCategory,
-	})
+	// 6. SEND RESULT'S, тоже только для зарегистрированных/админов
+	resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📍 | SEND RESULT'S", Type: discordgo.ChannelTypeGuildCategory})
+	if resultsCat != nil {
+		_ = s.ChannelPermissionSet(resultsCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
+		if registeredRoleID != "" {
+			_ = s.ChannelPermissionSet(resultsCat.ID, registeredRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+		}
+		if gameAdminRoleID != "" {
+			_ = s.ChannelPermissionSet(resultsCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+		}
+		if ticketAdminRoleID != "" {
+			_ = s.ChannelPermissionSet(resultsCat.ID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+		}
+	}
 
-	sendResultsCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-		Name:     "📌│отправить-результаты",
-		Type:     discordgo.ChannelTypeGuildText,
-		ParentID: resultsCat.ID,
-	})
+	sendResultsCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📌│отправить-результаты", Type: discordgo.ChannelTypeGuildText, ParentID: func() string { if resultsCat != nil { return resultsCat.ID }; return "" }()})
+	_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📊│история-игр", Type: discordgo.ChannelTypeGuildText, ParentID: func() string { if resultsCat != nil { return resultsCat.ID }; return "" }()})
+	_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│приоритет-игр", Type: discordgo.ChannelTypeGuildText, ParentID: func() string { if resultsCat != nil { return resultsCat.ID }; return "" }()})
+	_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│обычный-рег", Type: discordgo.ChannelTypeGuildText, ParentID: func() string { if resultsCat != nil { return resultsCat.ID }; return "" }()})
 
-	s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-		Name:     "📊│история-игр",
-		Type:     discordgo.ChannelTypeGuildText,
-		ParentID: resultsCat.ID,
-	})
-
-	s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-		Name:     "📁│приоритет-игр",
-		Type:     discordgo.ChannelTypeGuildText,
-		ParentID: resultsCat.ID,
-	})
-
-	s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-		Name:     "📁│обычный-рег",
-		Type:     discordgo.ChannelTypeGuildText,
-		ParentID: resultsCat.ID,
-	})
-
-	// Post welcome message in отправить-результаты
 	if sendResultsCh != nil {
 		embed := &discordgo.MessageEmbed{
 			Title: "📌 ОТПРАВКА РЕЗУЛЬТАТА",
-			Description: "Сыграли матч? Отправьте результат.\n\n" +
-				"**Как отправить**\n" +
-				"› Нажми **Отправить результат**\n" +
-				"› Укажи ID матча (номер из карточки)\n" +
-				"› Бот создаст ветку — скинь туда скриншот\n\n" +
-				"**Что дальше**\n" +
-				"› Заявка уходит модераторам матчей\n" +
-				"› Модератор вписывает счёт и статистику каждого игрока\n" +
-				"› Очки, рейтинг и статистика по картам обновляются автоматически\n" +
-				"› Отправить результат может любой участник матча",
+			Description: "Сыграли матч? Отправьте результат.\n\n**Как отправить**\n› Нажми **Отправить результат**\n› Укажи ID матча (номер из карточки)\n› Бот создаст ветку — скинь туда скриншот\n\n**Что дальше**\n› Заявка уходит модераторам матчей\n› Модератор вписывает счёт и статистику каждого игрока\n› Очки, рейтинг и статистика по картам обновляются автоматически\n› Отправить результат может любой участник матча",
 			Color: 0xe91e63,
-			Footer: &discordgo.MessageEmbedFooter{
-				Text: "ELITE FPL • результаты",
-			},
+			Footer: &discordgo.MessageEmbedFooter{Text: "ELITE FPL • результаты"},
 		}
-
 		components := []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Label:    "Отправить результат",
-						Style:    discordgo.DangerButton,
-						CustomID: "send_result",
-						Emoji: &discordgo.ComponentEmoji{
-							Name: "📝",
-						},
-					},
-				},
-			},
+			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "Отправить результат", Style: discordgo.DangerButton, CustomID: "send_result", Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
+			}},
 		}
-
-		s.ChannelMessageSendComplex(sendResultsCh.ID, &discordgo.MessageSend{
-			Embeds:     []*discordgo.MessageEmbed{embed},
-			Components: components,
-		})
+		_, _ = s.ChannelMessageSendComplex(sendResultsCh.ID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
 	}
 
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: strPtr("✅ Настройка завершена! Все лиги и каналы созданы."),
-	})
+	// 7. Всем текущим участникам выдать No registred, если не зарегистрированы
+	members, _ := s.GuildMembers(guildID, "", 1000)
+	for _, m := range members {
+		if m.User == nil || m.User.Bot {
+			continue
+		}
+		uid, _ := getOrCreateUser(m.User.ID, m.User.Username)
+		var isRegistered int
+		_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", m.User.ID).Scan(&isRegistered)
+		if isRegistered == 1 {
+			if registeredRoleID != "" {
+				_ = s.GuildMemberRoleAdd(guildID, m.User.ID, registeredRoleID)
+			}
+			var regNick string
+			_ = db.QueryRow("SELECT COALESCE(NULLIF(game_nick, ''), username) FROM users WHERE discord_id = ?", m.User.ID).Scan(&regNick)
+			guild, _ := s.Guild(guildID)
+			if guild != nil && guild.OwnerID != m.User.ID {
+				_ = s.GuildMemberNickname(guildID, m.User.ID, buildServerNick(uid, regNick))
+			}
+		} else {
+			if noRegRoleID != "" {
+				_ = s.GuildMemberRoleAdd(guildID, m.User.ID, noRegRoleID)
+			}
+		}
+	}
+
+	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: strPtr("✅ Настройка завершена! Регистрация добавлена, лиги скрыты для незарегистрированных.")})
 }
 
 func strPtr(s string) *string { return &s }
@@ -750,27 +818,69 @@ func handleDelete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // ── /register ───────────────────────────────────────────────────────────
 
 func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	var isRegistered int
+	_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered)
+	if isRegistered == 1 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "✅ Вы уже зарегистрированы. Для смены ника используйте /nickname",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseModal,
+		Data: &discordgo.InteractionResponseData{
+			CustomID: "modal_register",
+			Title:    "Регистрация",
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					discordgo.TextInput{CustomID: "register_nick", Label: "Игровой ник", Style: discordgo.TextInputShort, Placeholder: "Например: Merrzzik", Required: true},
+				}},
+				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					discordgo.TextInput{CustomID: "register_game_id", Label: "Игровой ID", Style: discordgo.TextInputShort, Placeholder: "Например: 126512660", Required: true},
+				}},
+			},
+		},
+	})
+}
+
+// ── /nickname ───────────────────────────────────────────────────────────
+
+func handleNickname(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	userID := i.Member.User.ID
-	username := i.Member.User.Username
+	options := i.ApplicationCommandData().Options
 
-	uid, _ := getOrCreateUser(userID, username)
-	db.Exec("UPDATE users SET is_registered = 1 WHERE discord_id = ?", userID)
+	nick := ""
+	gameID := ""
+	for _, opt := range options {
+		if opt.Name == "nick" {
+			nick = opt.StringValue()
+		}
+		if opt.Name == "game_id" {
+			gameID = opt.StringValue()
+		}
+	}
 
-	// Add Registered role, remove No registred
-	roles, _ := s.GuildRoles(i.GuildID)
-	for _, r := range roles {
-		if r.Name == "Registered" {
-			s.GuildMemberRoleAdd(i.GuildID, userID, r.ID)
-		}
-		if r.Name == "No registred" {
-			s.GuildMemberRoleRemove(i.GuildID, userID, r.ID)
-		}
+	uid, _ := getOrCreateUser(userID, i.Member.User.Username)
+	if gameID != "" {
+		_, _ = db.Exec("UPDATE users SET username = ?, game_nick = ?, game_id = ? WHERE discord_id = ?", nick, nick, gameID, userID)
+	} else {
+		_, _ = db.Exec("UPDATE users SET username = ?, game_nick = ? WHERE discord_id = ?", nick, nick, userID)
+	}
+
+	guild, _ := s.Guild(i.GuildID)
+	if guild != nil && guild.OwnerID != userID {
+		_ = s.GuildMemberNickname(i.GuildID, userID, buildServerNick(uid, nick))
 	}
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("✅ Вы зарегистрированы! Ваш ID: **#%d**", uid),
+			Content: fmt.Sprintf("✅ Ник обновлён: **%s**", buildServerNick(uid, nick)),
 			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
@@ -959,7 +1069,7 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 						discordgo.Button{
 							Label:    "Получить ID хоста",
 							Style:    discordgo.PrimaryButton,
-							CustomID: fmt.Sprintf("hostid_%d", matchID),
+							CustomID: fmt.Sprintf("hostid_%d_%s", matchID, state.TCapID),
 							Emoji:    &discordgo.ComponentEmoji{Name: "🆔"},
 						},
 						discordgo.Button{
@@ -1028,12 +1138,55 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	// Registration button
+	if customID == "open_register" {
+		var isRegistered int
+		_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered)
+		if isRegistered == 1 {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "✅ Вы уже зарегистрированы. Для смены ника используйте /nickname",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
+			})
+			return
+		}
+
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseModal,
+			Data: &discordgo.InteractionResponseData{
+				CustomID: "modal_register",
+				Title:    "Регистрация",
+				Components: []discordgo.MessageComponent{
+					discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						discordgo.TextInput{CustomID: "register_nick", Label: "Игровой ник", Style: discordgo.TextInputShort, Placeholder: "Например: Merrzzik", Required: true},
+					}},
+					discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						discordgo.TextInput{CustomID: "register_game_id", Label: "Игровой ID", Style: discordgo.TextInputShort, Placeholder: "Например: 126512660", Required: true},
+					}},
+				},
+			},
+		})
+		return
+	}
+
 	// Host ID button
 	if strings.HasPrefix(customID, "hostid_") {
+		parts := strings.SplitN(customID, "_", 3)
+		hostDiscordID := ""
+		if len(parts) == 3 {
+			hostDiscordID = parts[2]
+		}
+		hostGameID := ""
+		_ = db.QueryRow("SELECT game_id FROM users WHERE discord_id = ?", hostDiscordID).Scan(&hostGameID)
+		if hostGameID == "" {
+			hostGameID = "не указан"
+		}
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("🆔 Ваш ID хоста: **%s**", i.Member.User.ID[:8]),
+				Content: fmt.Sprintf("🆔 ID хоста: **%s**", hostGameID),
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
@@ -1069,6 +1222,38 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // ── Modal Submit ────────────────────────────────────────────────────────
 
 func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.ModalSubmitData().CustomID == "modal_register" {
+		nick := i.ModalSubmitData().Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+		gameID := i.ModalSubmitData().Components[1].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+		uid, _ := getOrCreateUser(i.Member.User.ID, i.Member.User.Username)
+
+		_, _ = db.Exec("UPDATE users SET username = ?, game_nick = ?, game_id = ?, is_registered = 1 WHERE discord_id = ?", nick, nick, gameID, i.Member.User.ID)
+
+		roles, _ := s.GuildRoles(i.GuildID)
+		for _, r := range roles {
+			if r.Name == "Registered" {
+				_ = s.GuildMemberRoleAdd(i.GuildID, i.Member.User.ID, r.ID)
+			}
+			if r.Name == "No registred" {
+				_ = s.GuildMemberRoleRemove(i.GuildID, i.Member.User.ID, r.ID)
+			}
+		}
+
+		guild, _ := s.Guild(i.GuildID)
+		if guild != nil && guild.OwnerID != i.Member.User.ID {
+			_ = s.GuildMemberNickname(i.GuildID, i.Member.User.ID, buildServerNick(uid, nick))
+		}
+
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("✅ Регистрация завершена! Ваш серверный ник: **%s**\n🆔 Игровой ID: **%s**", buildServerNick(uid, nick), gameID),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
 	if i.ModalSubmitData().CustomID == "modal_send_result" {
 		matchIDStr := i.ModalSubmitData().Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
 		matchID, err := strconv.Atoi(matchIDStr)
@@ -1083,7 +1268,6 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			return
 		}
 
-		// Check match exists
 		var status string
 		err = db.QueryRow("SELECT status FROM matches WHERE id = ?", matchID).Scan(&status)
 		if err != nil {
@@ -1097,13 +1281,11 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			return
 		}
 
-		// Create thread
 		thread, err := s.MessageThreadStartComplex(i.ChannelID, i.Message.ID, &discordgo.ThreadStart{
 			Name:                fmt.Sprintf("Отчет матча #%d", matchID),
 			AutoArchiveDuration: 60,
 		})
 		if err != nil {
-			// Try creating a thread without a message
 			thread, err = s.ThreadStartComplex(i.ChannelID, &discordgo.ThreadStart{
 				Name:                fmt.Sprintf("Отчет матча #%d", matchID),
 				AutoArchiveDuration: 60,
@@ -1122,9 +1304,8 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			return
 		}
 
-		s.ChannelMessageSend(thread.ID, fmt.Sprintf("<@%s>, отправьте финальный скриншот матча #%d сюда.\nБот автоматически обработает статистику.", i.Member.User.ID, matchID))
-
-		db.Exec("UPDATE matches SET status = 'reporting' WHERE id = ?", matchID)
+		_, _ = s.ChannelMessageSend(thread.ID, fmt.Sprintf("<@%s>, отправьте финальный скриншот матча #%d сюда.\nБот автоматически обработает статистику.", i.Member.User.ID, matchID))
+		_, _ = db.Exec("UPDATE matches SET status = 'reporting' WHERE id = ?", matchID)
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
