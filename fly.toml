@@ -1,0 +1,21 @@
+# fly.toml — конфиг для Fly.io (альтернатива Render)
+app = "elite-fpl-bot"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  MIN_LOBBY_PLAYERS = "10"
+  DB_PATH = "/data"
+
+[mounts]
+  source = "bot_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+[processes]
+  app = "./bot"
