@@ -712,6 +712,14 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	// 5. Лиги и лобби, скрытые от незарегистрированных
+	// Собираем ID всех категорий для выставления позиций
+	type catEntry struct {
+		ID       string
+		Position int
+	}
+	var allCategories []catEntry
+	pos := 1 // позиция 0 = регистрация
+
 	for _, league := range LeagueConfig {
 		for _, lobbyNum := range league.Lobbies {
 			catName := fmt.Sprintf("%s | %s", league.Emoji, league.Name)
@@ -719,6 +727,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			if err != nil || cat == nil {
 				continue
 			}
+			allCategories = append(allCategories, catEntry{cat.ID, pos})
+			pos++
 
 			_ = s.ChannelPermissionSet(cat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
 			if rid, ok := leagueRoleIDs[league.RoleName]; ok {
@@ -733,6 +743,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "ranked", Type: discordgo.ChannelTypeGuildText, ParentID: cat.ID})
 			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: fmt.Sprintf("Lobby %d", lobbyNum), Type: discordgo.ChannelTypeGuildVoice, ParentID: cat.ID, UserLimit: minPlayers})
+
+			time.Sleep(300 * time.Millisecond)
 		}
 	}
 
@@ -770,6 +782,21 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		_, _ = s.ChannelMessageSendComplex(sendResultsCh.ID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
 	}
+
+	// 6.5 Финально выставить позиции категорий в правильном порядке
+	if registrationCat != nil {
+		allCategories = append([]catEntry{{registrationCat.ID, 0}}, allCategories...)
+	}
+	if resultsCat != nil {
+		allCategories = append(allCategories, catEntry{resultsCat.ID, pos})
+	}
+
+	reorderData := make([]*discordgo.Channel, 0, len(allCategories))
+	for _, ce := range allCategories {
+		ch := &discordgo.Channel{ID: ce.ID, Position: ce.Position}
+		reorderData = append(reorderData, ch)
+	}
+	_ = s.GuildChannelsReorder(guildID, reorderData)
 
 	// 7. Всем текущим участникам выдать роли
 	defaultLeagueRoleID := leagueRoleIDs["Default League"]
