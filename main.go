@@ -39,26 +39,24 @@ var Maps = []MapInfo{
 
 // ── Leagues ─────────────────────────────────────────────────────────────
 type LeagueCategory struct {
-	Name    string
-	Emoji   string
-	Lobbies []int
+	Name     string
+	Emoji    string
+	Lobbies  []int
+	RoleName string // роль для доступа к лиге
 }
 
-// Exact order from screenshots:
-// PRO LEAGUE 1-3, PRO REMASTERED 4-5,
-// DIVISION LEAGUE 1-3, DIVISION REMASTERED 4-5,
-// PROSPECT LEAGUE 1-3, PROSPECT REMASTERED 4-5,
-// DEFAULT LEAGUE 1-3, DEFAULT REMASTERED 4-5
 var LeagueConfig = []LeagueCategory{
-	{"PRO LEAGUE", "🔴", []int{1, 2, 3}},
-	{"PRO REMASTERED", "🔴", []int{4, 5}},
-	{"DIVISION LEAGUE", "🟣", []int{1, 2, 3}},
-	{"DIVISION REMASTERED", "🟣", []int{4, 5}},
-	{"PROSPECT LEAGUE", "🟢", []int{1, 2, 3}},
-	{"PROSPECT REMASTERED", "🟢", []int{4, 5}},
-	{"DEFAULT LEAGUE", "⚪", []int{1, 2, 3}},
-	{"DEFAULT REMASTERED", "⚪", []int{4, 5}},
+	{"PRO LEAGUE", "🔴", []int{1, 2, 3}, "Pro League"},
+	{"PRO REMASTERED", "🔴", []int{4, 5}, "Pro League"},
+	{"DIVISION LEAGUE", "🟣", []int{1, 2, 3}, "Division League"},
+	{"DIVISION REMASTERED", "🟣", []int{4, 5}, "Division League"},
+	{"PROSPECT LEAGUE", "🟢", []int{1, 2, 3}, "Prospect League"},
+	{"PROSPECT REMASTERED", "🟢", []int{4, 5}, "Prospect League"},
+	{"DEFAULT LEAGUE", "⚪", []int{1, 2, 3}, "Default League"},
+	{"DEFAULT REMASTERED", "⚪", []int{4, 5}, "Default League"},
 }
+
+var LeagueRoles = []string{"Pro League", "Division League", "Prospect League", "Default League"}
 
 // ── Active pick/ban state ───────────────────────────────────────────────
 type PickBanState struct {
@@ -210,6 +208,12 @@ func getOrCreateUser(discordID, username string) (int, error) {
 func onReady(s *discordgo.Session, r *discordgo.Ready) {
 	log.Printf("Logged in as %s", r.User.Username)
 
+	// Удалить все старые глобальные команды
+	existingCmds, _ := s.ApplicationCommands(r.User.ID, "")
+	for _, cmd := range existingCmds {
+		_ = s.ApplicationCommandDelete(r.User.ID, "", cmd.ID)
+	}
+
 	commands := []*discordgo.ApplicationCommand{
 		{
 			Name:                     "setup",
@@ -232,10 +236,6 @@ func onReady(s *discordgo.Session, r *discordgo.Ready) {
 					Required:    false,
 				},
 			},
-		},
-		{
-			Name:        "register",
-			Description: "Открыть форму регистрации",
 		},
 		{
 			Name:        "nickname",
@@ -613,8 +613,6 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleDelete(s, i)
 	case "profile":
 		handleProfile(s, i)
-	case "register":
-		handleRegister(s, i)
 	case "nickname":
 		handleNickname(s, i)
 	}
@@ -646,27 +644,37 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	// 2. Удалить старые роли бота
+	botRoleNames := map[string]bool{"No registred": true, "Registered": true, "Game Admin": true, "Ticket Admin": true}
+	for _, lr := range LeagueRoles {
+		botRoleNames[lr] = true
+	}
 	roles, _ := s.GuildRoles(guildID)
 	for _, r := range roles {
-		if r.Name == "No registred" || r.Name == "Registered" || r.Name == "Game Admin" || r.Name == "Ticket Admin" {
+		if botRoleNames[r.Name] {
 			_ = s.GuildRoleDelete(guildID, r.ID)
 		}
 	}
 
 	// 3. Создать роли
 	noRegRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "No registred"})
-	registeredRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Registered"})
 	gameAdminRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Game Admin"})
 	ticketAdminRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Ticket Admin"})
 
-	registeredRoleID := ""
 	gameAdminRoleID := ""
 	ticketAdminRoleID := ""
 	noRegRoleID := ""
-	if registeredRole != nil { registeredRoleID = registeredRole.ID }
 	if gameAdminRole != nil { gameAdminRoleID = gameAdminRole.ID }
 	if ticketAdminRole != nil { ticketAdminRoleID = ticketAdminRole.ID }
 	if noRegRole != nil { noRegRoleID = noRegRole.ID }
+
+	// Роли лиг
+	leagueRoleIDs := map[string]string{}
+	for _, lr := range LeagueRoles {
+		role, err := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: lr})
+		if err == nil && role != nil {
+			leagueRoleIDs[lr] = role.ID
+		}
+	}
 
 	privateAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
 	privateDeny := int64(discordgo.PermissionViewChannel)
@@ -713,8 +721,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			}
 
 			_ = s.ChannelPermissionSet(cat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			if registeredRoleID != "" {
-				_ = s.ChannelPermissionSet(cat.ID, registeredRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+			if rid, ok := leagueRoleIDs[league.RoleName]; ok {
+				_ = s.ChannelPermissionSet(cat.ID, rid, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
 			if gameAdminRoleID != "" {
 				_ = s.ChannelPermissionSet(cat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
@@ -732,8 +740,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📍 | SEND RESULT'S", Type: discordgo.ChannelTypeGuildCategory})
 	if resultsCat != nil {
 		_ = s.ChannelPermissionSet(resultsCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-		if registeredRoleID != "" {
-			_ = s.ChannelPermissionSet(resultsCat.ID, registeredRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
+		for _, rid := range leagueRoleIDs {
+			_ = s.ChannelPermissionSet(resultsCat.ID, rid, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 		}
 		if gameAdminRoleID != "" {
 			_ = s.ChannelPermissionSet(resultsCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
@@ -763,7 +771,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		_, _ = s.ChannelMessageSendComplex(sendResultsCh.ID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
 	}
 
-	// 7. Всем текущим участникам выдать No registred, если не зарегистрированы
+	// 7. Всем текущим участникам выдать роли
+	defaultLeagueRoleID := leagueRoleIDs["Default League"]
 	members, _ := s.GuildMembers(guildID, "", 1000)
 	for _, m := range members {
 		if m.User == nil || m.User.Bot {
@@ -773,8 +782,8 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		var isRegistered int
 		_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", m.User.ID).Scan(&isRegistered)
 		if isRegistered == 1 {
-			if registeredRoleID != "" {
-				_ = s.GuildMemberRoleAdd(guildID, m.User.ID, registeredRoleID)
+			if defaultLeagueRoleID != "" {
+				_ = s.GuildMemberRoleAdd(guildID, m.User.ID, defaultLeagueRoleID)
 			}
 			var regNick string
 			_ = db.QueryRow("SELECT COALESCE(NULLIF(game_nick, ''), username) FROM users WHERE discord_id = ?", m.User.ID).Scan(&regNick)
@@ -789,7 +798,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: strPtr("✅ Настройка завершена! Регистрация добавлена, лиги скрыты для незарегистрированных.")})
+	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: strPtr("✅ Настройка завершена! После регистрации выдаётся Default League.")})
 }
 
 func strPtr(s string) *string { return &s }
@@ -813,39 +822,6 @@ func handleDelete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			s.GuildRoleDelete(i.GuildID, r.ID)
 		}
 	}
-}
-
-// ── /register ───────────────────────────────────────────────────────────
-
-func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	var isRegistered int
-	_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered)
-	if isRegistered == 1 {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "✅ Вы уже зарегистрированы. Для смены ника используйте /nickname",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
-		return
-	}
-
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseModal,
-		Data: &discordgo.InteractionResponseData{
-			CustomID: "modal_register",
-			Title:    "Регистрация",
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-					discordgo.TextInput{CustomID: "register_nick", Label: "Игровой ник", Style: discordgo.TextInputShort, Placeholder: "Например: Merrzzik", Required: true},
-				}},
-				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-					discordgo.TextInput{CustomID: "register_game_id", Label: "Игровой ID", Style: discordgo.TextInputShort, Placeholder: "Например: 126512660", Required: true},
-				}},
-			},
-		},
-	})
 }
 
 // ── /nickname ───────────────────────────────────────────────────────────
@@ -1231,7 +1207,7 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 		roles, _ := s.GuildRoles(i.GuildID)
 		for _, r := range roles {
-			if r.Name == "Registered" {
+			if r.Name == "Default League" {
 				_ = s.GuildMemberRoleAdd(i.GuildID, i.Member.User.ID, r.ID)
 			}
 			if r.Name == "No registred" {
