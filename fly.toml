@@ -1,5 +1,4 @@
-# fly.toml — конфиг для Fly.io (альтернатива Render)
-app = "elite-fpl-bot"
+app = "faceit"
 primary_region = "fra"
 
 [build]
@@ -13,9 +12,19 @@ primary_region = "fra"
   source = "bot_data"
   destination = "/data"
 
+[processes]
+  app = "./bot"
+
 [[services]]
   internal_port = 8080
   protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
 
-[processes]
-  app = "./bot"
+  [[services.ports]]
+    port = 8080
+
+  [[services.http_checks]]
+    interval = 30000
+    timeout = 5000
+    path = "/"
