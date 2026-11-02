@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: faceit-bot
+    runtime: docker
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: MIN_LOBBY_PLAYERS
+        value: 10
+      - key: DB_PATH
+        value: /data
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1
