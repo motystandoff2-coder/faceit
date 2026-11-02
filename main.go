@@ -46,14 +46,10 @@ type LeagueCategory struct {
 
 // Exact order: PRO 1-3, PRO REM 4-5, DIV 1-3, DIV REM 4-5, PROSPECT 1-3, PROSPECT REM 4-5, DEFAULT 1-3, DEFAULT REM 4-5
 var LeagueConfig = []LeagueCategory{
-	{"PRO LEAGUE", "🔴", []int{1, 2, 3}},
-	{"PRO REMASTERED", "🔴", []int{4, 5}},
-	{"DIVISION LEAGUE", "🟣", []int{1, 2, 3}},
-	{"DIVISION REMASTERED", "🟣", []int{4, 5}},
-	{"PROSPECT LEAGUE", "🟢", []int{1, 2, 3}},
-	{"PROSPECT REMASTERED", "🟢", []int{4, 5}},
-	{"DEFAULT LEAGUE", "⚪", []int{1, 2, 3}},
-	{"DEFAULT REMASTERED", "⚪", []int{4, 5}},
+	{"PRO LEAGUE", "🔴", []int{1, 2, 3, 4, 5}},
+	{"DIVISION LEAGUE", "🟣", []int{1, 2, 3, 4, 5}},
+	{"PROSPECT LEAGUE", "🟢", []int{1, 2, 3, 4, 5}},
+	{"DEFAULT LEAGUE", "⚪", []int{1, 2, 3, 4, 5}},
 }
 
 // ── Active pick/ban state ───────────────────────────────────────────────
