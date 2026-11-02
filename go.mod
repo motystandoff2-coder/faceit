@@ -1,10 +1,10 @@
 module elite-fpl-bot
 
-go 1.26.0
+go 1.22
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
-	modernc.org/sqlite v1.61.1
+	modernc.org/sqlite v1.29.1
 )
 
 require (
