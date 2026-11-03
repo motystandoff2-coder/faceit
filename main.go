@@ -961,6 +961,15 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка ranked в %s / Lobby %d: %v", league.Name, lobbyNum, rankedErr))
 					continue
 				}
+				// Запретить всем писать в ranked — только бот пишет
+				_ = s.ChannelPermissionSet(rankedCh.ID, guildID, discordgo.PermissionOverwriteTypeRole,
+					int64(discordgo.PermissionViewChannel|discordgo.PermissionReadMessageHistory),
+					int64(discordgo.PermissionSendMessages))
+				// Бот может писать
+				if session.State != nil && session.State.User != nil {
+					_ = s.ChannelPermissionSet(rankedCh.ID, session.State.User.ID, discordgo.PermissionOverwriteTypeMember,
+						int64(discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionReadMessageHistory|discordgo.PermissionEmbedLinks), 0)
+				}
 
 				time.Sleep(1 * time.Second)
 
