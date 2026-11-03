@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -19,8 +22,9 @@ import (
 )
 
 var (
-	db      *sql.DB
-	session *discordgo.Session
+	db       *sql.DB
+	session  *discordgo.Session
+	botToken string
 
 	setupMu         sync.Mutex
 	setupInProgress = map[string]bool{}
@@ -91,6 +95,7 @@ func main() {
 	if token == "" {
 		log.Fatal("DISCORD_TOKEN not set")
 	}
+	botToken = token
 
 	initDB()
 
@@ -311,6 +316,47 @@ func isManagedChannelName(name string) bool {
 		return true
 	}
 	return false
+}
+
+func probeChannelCreateAvailability(s *discordgo.Session, guildID string) (time.Duration, error) {
+	payload := map[string]any{"name": "SETUP-PROBE", "type": 4}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", "https://discord.com/api/v10/guilds/"+guildID+"/channels", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bot "+botToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == 429 {
+		var rl struct {
+			Message    string  `json:"message"`
+			RetryAfter float64 `json:"retry_after"`
+		}
+		_ = json.Unmarshal(respBody, &rl)
+		return time.Duration(rl.RetryAfter * float64(time.Second)), fmt.Errorf("rate_limited")
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("probe failed: %s %s", resp.Status, string(respBody))
+	}
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(respBody, &created)
+	if created.ID != "" {
+		_, _ = s.ChannelDelete(created.ID)
+	}
+	return 0, nil
 }
 
 func onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
@@ -722,6 +768,22 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}()
 
 		log.Println("[SETUP] Starting setup for guild:", guildID)
+
+		// 0. Проверка: Discord сейчас вообще разрешает создавать каналы?
+		if waitFor, err := probeChannelCreateAvailability(s, guildID); err != nil {
+			if err.Error() == "rate_limited" {
+				hours := int(waitFor.Hours())
+				mins := int(waitFor.Minutes()) % 60
+				msg := fmt.Sprintf("❌ Discord временно заблокировал создание каналов для этого бота.\n⏳ Подожди примерно: **%d ч %d мин**\n\nПричина: слишком много операций создания/удаления каналов за короткое время.", hours, mins)
+				_, _ = s.ChannelMessageSend(commandChannelID, msg)
+				log.Printf("[SETUP] Channel creation cooldown active: %v", waitFor)
+				return
+			}
+			_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Не удалось проверить возможность создания каналов: %v", err))
+			log.Printf("[SETUP] Probe error: %v", err)
+			return
+		}
+
 		_, _ = s.ChannelMessageSend(commandChannelID, "⚙️ Начинаю очистку старой структуры бота...")
 
 		// 1. Удалить только каналы/категории, которыми управляет бот
