@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/glebarez/go-sqlite v1.22.0
+	github.com/lib/pq v1.10.9
 )
 
 require (

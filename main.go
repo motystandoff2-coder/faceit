@@ -19,15 +19,18 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	_ "github.com/glebarez/go-sqlite"
+	_ "github.com/lib/pq"
 )
 
 var (
-	db       *sql.DB
-	session  *discordgo.Session
-	botToken string
+	db        *sql.DB
+	session   *discordgo.Session
+	botToken  string
+	dbDialect = "sqlite"
 
 	setupMu         sync.Mutex
 	setupInProgress = map[string]bool{}
+	pickBanMu       sync.Mutex
 )
 
 // ── Maps ────────────────────────────────────────────────────────────────
@@ -69,16 +72,21 @@ var LeagueRoles = []string{"Pro League", "Division League", "Prospect League", "
 
 // ── Active pick/ban state ───────────────────────────────────────────────
 type PickBanState struct {
-	MatchID    int
-	ChannelID  string
-	MessageID  string
-	TCapID     string // discord user id of T captain
-	CTCapID    string // discord user id of CT captain
-	TTeam      []PlayerInfo
-	CTTeam     []PlayerInfo
-	BannedMaps []string
-	Turn       string // "T" or "CT"
-	League     string
+	MatchID      int
+	GuildID      string
+	ChannelID    string
+	MessageID    string
+	TCapID       string // discord user id of T captain
+	CTCapID      string // discord user id of CT captain
+	TTeam        []PlayerInfo
+	CTTeam       []PlayerInfo
+	BannedMaps   []string
+	Turn         string // "T" or "CT"
+	League       string
+	BanVersion   int
+	TVoiceID     string
+	CTVoiceID    string
+	VoiceParentID string
 }
 
 type PlayerInfo struct {
@@ -144,20 +152,118 @@ func main() {
 
 // ── Database ────────────────────────────────────────────────────────────
 
+func sqlize(query string) string {
+	if dbDialect != "postgres" {
+		return query
+	}
+	var b strings.Builder
+	idx := 1
+	for _, ch := range query {
+		if ch == '?' {
+			b.WriteString(fmt.Sprintf("$%d", idx))
+			idx++
+		} else {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+func execDB(query string, args ...any) (sql.Result, error) {
+	return db.Exec(sqlize(query), args...)
+}
+
+func queryRowDB(query string, args ...any) *sql.Row {
+	return db.QueryRow(sqlize(query), args...)
+}
+
+func queryDB(query string, args ...any) (*sql.Rows, error) {
+	return db.Query(sqlize(query), args...)
+}
+
 func initDB() {
+	var err error
+
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		dbDialect = "postgres"
+		db, err = sql.Open("postgres", databaseURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err = db.Ping(); err != nil {
+			log.Fatal(err)
+		}
+		log.Println("Connected to PostgreSQL via DATABASE_URL")
+
+		_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
+			id SERIAL PRIMARY KEY,
+			discord_id TEXT UNIQUE NOT NULL,
+			username TEXT NOT NULL,
+			game_nick TEXT DEFAULT '',
+			game_id TEXT DEFAULT '',
+			is_registered INTEGER DEFAULT 0,
+			elo INTEGER DEFAULT 1000,
+			games INTEGER DEFAULT 0,
+			wins INTEGER DEFAULT 0,
+			losses INTEGER DEFAULT 0,
+			kills INTEGER DEFAULT 0,
+			deaths INTEGER DEFAULT 0,
+			assists INTEGER DEFAULT 0,
+			mvps INTEGER DEFAULT 0,
+			joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`)
+
+		_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS matches (
+			id SERIAL PRIMARY KEY,
+			status TEXT DEFAULT 'picking',
+			map_name TEXT DEFAULT '',
+			score_t INTEGER DEFAULT 0,
+			score_ct INTEGER DEFAULT 0,
+			host_id TEXT DEFAULT '',
+			category TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`)
+
+		_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS match_players (
+			id SERIAL PRIMARY KEY,
+			match_id INTEGER,
+			user_id INTEGER,
+			team TEXT,
+			kills INTEGER DEFAULT 0,
+			deaths INTEGER DEFAULT 0,
+			assists INTEGER DEFAULT 0,
+			rating REAL DEFAULT 0,
+			is_captain INTEGER DEFAULT 0
+		)`)
+
+		_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS map_stats (
+			id SERIAL PRIMARY KEY,
+			user_id INTEGER,
+			map_name TEXT,
+			wins INTEGER DEFAULT 0,
+			losses INTEGER DEFAULT 0,
+			kills INTEGER DEFAULT 0,
+			deaths INTEGER DEFAULT 0
+		)`)
+
+		_, _ = db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS game_nick TEXT DEFAULT ''")
+		_, _ = db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS game_id TEXT DEFAULT ''")
+		return
+	}
+
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = "/app/data"
 	}
 	os.MkdirAll(dbPath, 0755)
 
-	var err error
+	dbDialect = "sqlite"
 	db, err = sql.Open("sqlite", dbPath+"/bot.db")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	db.Exec(`CREATE TABLE IF NOT EXISTS users (
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		discord_id TEXT UNIQUE NOT NULL,
 		username TEXT NOT NULL,
@@ -175,7 +281,7 @@ func initDB() {
 		joined_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 
-	db.Exec(`CREATE TABLE IF NOT EXISTS matches (
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS matches (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		status TEXT DEFAULT 'picking',
 		map_name TEXT DEFAULT '',
@@ -186,7 +292,7 @@ func initDB() {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 
-	db.Exec(`CREATE TABLE IF NOT EXISTS match_players (
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS match_players (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		match_id INTEGER,
 		user_id INTEGER,
@@ -198,7 +304,7 @@ func initDB() {
 		is_captain INTEGER DEFAULT 0
 	)`)
 
-	db.Exec(`CREATE TABLE IF NOT EXISTS map_stats (
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS map_stats (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id INTEGER,
 		map_name TEXT,
@@ -208,18 +314,21 @@ func initDB() {
 		deaths INTEGER DEFAULT 0
 	)`)
 
-	// Upgrade existing databases safely
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN game_nick TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN game_id TEXT DEFAULT ''")
 }
 
 func getOrCreateUser(discordID, username string) (int, error) {
 	var id int
-	err := db.QueryRow("SELECT id FROM users WHERE discord_id = ?", discordID).Scan(&id)
+	err := queryRowDB("SELECT id FROM users WHERE discord_id = ?", discordID).Scan(&id)
 	if err == sql.ErrNoRows {
-		res, err := db.Exec("INSERT INTO users (discord_id, username) VALUES (?, ?)", discordID, username)
+		res, err := execDB("INSERT INTO users (discord_id, username) VALUES (?, ?)", discordID, username)
 		if err != nil {
 			return 0, err
+		}
+		if dbDialect == "postgres" {
+			err = queryRowDB("SELECT id FROM users WHERE discord_id = ?", discordID).Scan(&id)
+			return id, err
 		}
 		lid, _ := res.LastInsertId()
 		return int(lid), nil
@@ -377,10 +486,33 @@ func onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 // ── Voice State Update (lobby detection) ────────────────────────────────
 
 func onVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
+	// Если пользователь покинул T/CT войс — проверим автоудаление через 3 минуты
+	if v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "" {
+		oldCh, _ := s.Channel(v.BeforeUpdate.ChannelID)
+		if oldCh != nil && (strings.HasPrefix(oldCh.Name, "T │ Матч #") || strings.HasPrefix(oldCh.Name, "CT │ Матч #")) {
+			matchNum := 0
+			fmt.Sscanf(oldCh.Name, "T │ Матч #%d", &matchNum)
+			if matchNum == 0 {
+				fmt.Sscanf(oldCh.Name, "CT │ Матч #%d", &matchNum)
+			}
+			if matchNum > 0 {
+				state := &PickBanState{MatchID: matchNum, GuildID: v.GuildID}
+				state.TVoiceID = oldCh.ID
+				channels, _ := s.GuildChannels(v.GuildID)
+				for _, c := range channels {
+					if c.Type == discordgo.ChannelTypeGuildVoice && strings.Contains(c.Name, fmt.Sprintf("Матч #%d", matchNum)) {
+						if strings.HasPrefix(c.Name, "T │") { state.TVoiceID = c.ID }
+						if strings.HasPrefix(c.Name, "CT │") { state.CTVoiceID = c.ID }
+					}
+				}
+				scheduleTeamVoicesCleanup(s, v.GuildID, state)
+			}
+		}
+	}
+
 	if v.ChannelID == "" {
 		return
 	}
-	// If user joined a channel
 	if v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID == v.ChannelID {
 		return
 	}
@@ -402,7 +534,7 @@ func onVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
 
 	// Set nickname to #ID | registered game nick
 	displayNick := member.User.Username
-	_ = db.QueryRow("SELECT COALESCE(NULLIF(game_nick, ''), username) FROM users WHERE discord_id = ?", v.UserID).Scan(&displayNick)
+	_ = queryRowDB("SELECT COALESCE(NULLIF(game_nick, ''), username) FROM users WHERE discord_id = ?", v.UserID).Scan(&displayNick)
 	nick := buildServerNick(userID, displayNick)
 	guild, _ := s.Guild(v.GuildID)
 	if guild != nil && guild.OwnerID != v.UserID {
@@ -468,19 +600,29 @@ func onVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
 // ── Start Pick/Ban ──────────────────────────────────────────────────────
 
 func startPickBan(s *discordgo.Session, guildID, channelID string, playerIDs []string, league string) {
-	// Check if already active in this channel
+	pickBanMu.Lock()
 	if _, exists := activePickBans[channelID]; exists {
+		pickBanMu.Unlock()
 		return
 	}
+	pickBanMu.Unlock()
 
 	// Create match in DB
-	res, err := db.Exec("INSERT INTO matches (status, category) VALUES ('picking', ?)", league)
-	if err != nil {
-		log.Println("Error creating match:", err)
-		return
+	matchID := 0
+	if dbDialect == "postgres" {
+		if err := queryRowDB("INSERT INTO matches (status, category) VALUES ('picking', ?) RETURNING id", league).Scan(&matchID); err != nil {
+			log.Println("Error creating match:", err)
+			return
+		}
+	} else {
+		res, err := execDB("INSERT INTO matches (status, category) VALUES ('picking', ?)", league)
+		if err != nil {
+			log.Println("Error creating match:", err)
+			return
+		}
+		matchID64, _ := res.LastInsertId()
+		matchID = int(matchID64)
 	}
-	matchID64, _ := res.LastInsertId()
-	matchID := int(matchID64)
 
 	// Build player info
 	var allPlayers []PlayerInfo
@@ -516,18 +658,19 @@ func startPickBan(s *discordgo.Session, guildID, channelID string, playerIDs []s
 		if p.IsCaptain {
 			isCap = 1
 		}
-		db.Exec("INSERT INTO match_players (match_id, user_id, team, is_captain) VALUES (?, ?, 'T', ?)", matchID, p.UniqueID, isCap)
+		_, _ = execDB("INSERT INTO match_players (match_id, user_id, team, is_captain) VALUES (?, ?, 'T', ?)", matchID, p.UniqueID, isCap)
 	}
 	for _, p := range ctTeam {
 		isCap := 0
 		if p.IsCaptain {
 			isCap = 1
 		}
-		db.Exec("INSERT INTO match_players (match_id, user_id, team, is_captain) VALUES (?, ?, 'CT', ?)", matchID, p.UniqueID, isCap)
+		_, _ = execDB("INSERT INTO match_players (match_id, user_id, team, is_captain) VALUES (?, ?, 'CT', ?)", matchID, p.UniqueID, isCap)
 	}
 
 	state := &PickBanState{
 		MatchID:    matchID,
+		GuildID:    guildID,
 		ChannelID:  channelID,
 		TCapID:     tTeam[tCapIdx].DiscordID,
 		CTCapID:    ctTeam[ctCapIdx].DiscordID,
@@ -536,8 +679,11 @@ func startPickBan(s *discordgo.Session, guildID, channelID string, playerIDs []s
 		BannedMaps: []string{},
 		Turn:       "T",
 		League:     league,
+		BanVersion: 1,
 	}
+	pickBanMu.Lock()
 	activePickBans[channelID] = state
+	pickBanMu.Unlock()
 
 	// Mention all players
 	mentions := ""
@@ -570,6 +716,7 @@ func startPickBan(s *discordgo.Session, guildID, channelID string, playerIDs []s
 		return
 	}
 	state.MessageID = msg.ID
+	scheduleAutoBan(s, state)
 }
 
 func buildPickBanEmbed(state *PickBanState) *discordgo.MessageEmbed {
@@ -678,6 +825,137 @@ func buildMapSelectOptions(state *PickBanState) []discordgo.SelectMenuOption {
 		})
 	}
 	return options
+}
+
+func updatePickBanMessage(s *discordgo.Session, state *PickBanState) {
+	embed := buildPickBanEmbed(state)
+	placeholder := fmt.Sprintf("%s: забань карту", state.Turn)
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.SelectMenu{CustomID: fmt.Sprintf("ban_%d", state.MatchID), Placeholder: placeholder, Options: buildMapSelectOptions(state)},
+		}},
+	}
+	_, _ = s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: state.MessageID, Channel: state.ChannelID, Embeds: &[]*discordgo.MessageEmbed{embed}, Components: &components})
+}
+
+func scheduleAutoBan(s *discordgo.Session, state *PickBanState) {
+	version := state.BanVersion
+	channelID := state.ChannelID
+	go func() {
+		time.Sleep(15 * time.Second)
+		pickBanMu.Lock()
+		current, ok := activePickBans[channelID]
+		if !ok || current.BanVersion != version {
+			pickBanMu.Unlock()
+			return
+		}
+		remaining := getRemainingMaps(current.BannedMaps)
+		if len(remaining) <= 1 {
+			pickBanMu.Unlock()
+			return
+		}
+		autoMap := remaining[rand.Intn(len(remaining))].Name
+		current.BannedMaps = append(current.BannedMaps, autoMap)
+		if current.Turn == "T" {
+			current.Turn = "CT"
+		} else {
+			current.Turn = "T"
+		}
+		current.BanVersion++
+		remainingAfter := getRemainingMaps(current.BannedMaps)
+		pickBanMu.Unlock()
+
+		_, _ = s.ChannelMessageSend(current.ChannelID, fmt.Sprintf("⏱️ Капитан не забанил карту за 15 секунд — карта **%s** забанена автоматически.", autoMap))
+
+		if len(remainingAfter) == 1 {
+			finalizeMatchStart(s, current, remainingAfter[0])
+			return
+		}
+		updatePickBanMessage(s, current)
+		scheduleAutoBan(s, current)
+	}()
+}
+
+func scheduleTeamVoicesCleanup(s *discordgo.Session, guildID string, state *PickBanState) {
+	matchID := state.MatchID
+	go func() {
+		time.Sleep(3 * time.Minute)
+		g, err := s.State.Guild(guildID)
+		if err != nil {
+			g, err = s.Guild(guildID)
+			if err != nil || g == nil {
+				return
+			}
+		}
+		countT, countCT := 0, 0
+		for _, vs := range g.VoiceStates {
+			if state.TVoiceID != "" && vs.ChannelID == state.TVoiceID { countT++ }
+			if state.CTVoiceID != "" && vs.ChannelID == state.CTVoiceID { countCT++ }
+		}
+		if countT == 0 && countCT == 0 {
+			if state.TVoiceID != "" { _, _ = s.ChannelDelete(state.TVoiceID) }
+			if state.CTVoiceID != "" { _, _ = s.ChannelDelete(state.CTVoiceID) }
+		}
+		_ = matchID
+	}()
+}
+
+func finalizeMatchStart(s *discordgo.Session, state *PickBanState, finalMap MapInfo) {
+	_, _ = execDB("UPDATE matches SET map_name = ?, status = 'playing' WHERE id = ?", finalMap.Name, state.MatchID)
+	pickBanMu.Lock()
+	delete(activePickBans, state.ChannelID)
+	pickBanMu.Unlock()
+
+	_, _ = s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: state.MessageID, Channel: state.ChannelID, Embeds: &[]*discordgo.MessageEmbed{}, Components: &[]discordgo.MessageComponent{}})
+
+	hostMention := fmt.Sprintf("<@%s>", state.TCapID)
+	mentions := ""
+	for _, p := range append(state.TTeam, state.CTTeam...) { mentions += fmt.Sprintf("<@%s> ", p.DiscordID) }
+
+	embed := &discordgo.MessageEmbed{
+		Title:       fmt.Sprintf("#%d · %s %s", state.MatchID, finalMap.Emoji, finalMap.Name),
+		Description: "Игра идёт до **13 раундов**\n**Комнаты:** 🔒 Нет доступа · 🔒 Нет доступа — зайти может только свой состав\n*Ждём ссылку на лобби от хоста...*",
+		Color:       0xe91e63,
+		Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("ID матча для отправки результата: %d • %s", state.MatchID, time.Now().Format("02.01.2006 15:04"))},
+	}
+
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Label: "Отправить ссылку на лобби", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("lobby_link_%d", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "🔗"}},
+			discordgo.Button{Label: "Получить ID хоста", Style: discordgo.PrimaryButton, CustomID: fmt.Sprintf("hostid_%d_%s", state.MatchID, state.TCapID), Emoji: &discordgo.ComponentEmoji{Name: "🆔"}},
+			discordgo.Button{Label: "Игрок не зашёл (0/6)", Style: discordgo.DangerButton, CustomID: fmt.Sprintf("noshow_%d", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "🚫"}},
+		}},
+	}
+	_, _ = s.ChannelMessageSendComplex(state.ChannelID, &discordgo.MessageSend{Content: mentions, Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
+	_, _ = s.ChannelMessageSend(state.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби и нажми **Отправить ссылку на лобби**.", hostMention, state.MatchID))
+
+	// Создание приватных T/CT войсов и автоперенос
+	ch, _ := s.Channel(state.ChannelID)
+	if ch != nil {
+		denyAll := int64(discordgo.PermissionViewChannel)
+		allowVoice := int64(discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
+		adminRoleIDs := []string{}
+		allRoles, _ := s.GuildRoles(state.GuildID)
+		for _, r := range allRoles {
+			if r.Name == "Game Admin" || r.Name == "Ticket Admin" { adminRoleIDs = append(adminRoleIDs, r.ID) }
+		}
+		tOverwrites := []*discordgo.PermissionOverwrite{{ID: state.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: denyAll}}
+		for _, p := range state.TTeam { tOverwrites = append(tOverwrites, &discordgo.PermissionOverwrite{ID: p.DiscordID, Type: discordgo.PermissionOverwriteTypeMember, Allow: allowVoice}) }
+		for _, rid := range adminRoleIDs { tOverwrites = append(tOverwrites, &discordgo.PermissionOverwrite{ID: rid, Type: discordgo.PermissionOverwriteTypeRole, Allow: allowVoice}) }
+		ctOverwrites := []*discordgo.PermissionOverwrite{{ID: state.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: denyAll}}
+		for _, p := range state.CTTeam { ctOverwrites = append(ctOverwrites, &discordgo.PermissionOverwrite{ID: p.DiscordID, Type: discordgo.PermissionOverwriteTypeMember, Allow: allowVoice}) }
+		for _, rid := range adminRoleIDs { ctOverwrites = append(ctOverwrites, &discordgo.PermissionOverwrite{ID: rid, Type: discordgo.PermissionOverwriteTypeRole, Allow: allowVoice}) }
+		parentID := ch.ParentID
+		tVoice, _ := s.GuildChannelCreateComplex(state.GuildID, discordgo.GuildChannelCreateData{Name: fmt.Sprintf("T │ Матч #%d", state.MatchID), Type: discordgo.ChannelTypeGuildVoice, ParentID: parentID, UserLimit: 5, PermissionOverwrites: tOverwrites})
+		ctVoice, _ := s.GuildChannelCreateComplex(state.GuildID, discordgo.GuildChannelCreateData{Name: fmt.Sprintf("CT │ Матч #%d", state.MatchID), Type: discordgo.ChannelTypeGuildVoice, ParentID: parentID, UserLimit: 5, PermissionOverwrites: ctOverwrites})
+		if tVoice != nil { state.TVoiceID = tVoice.ID }
+		if ctVoice != nil { state.CTVoiceID = ctVoice.ID }
+		state.VoiceParentID = parentID
+		time.Sleep(1 * time.Second)
+		if tVoice != nil { for _, p := range state.TTeam { _ = s.GuildMemberMove(state.GuildID, p.DiscordID, &tVoice.ID) } }
+		if ctVoice != nil { for _, p := range state.CTTeam { _ = s.GuildMemberMove(state.GuildID, p.DiscordID, &ctVoice.ID) } }
+		scheduleTeamVoicesCleanup(s, state.GuildID, state)
+	}
 }
 
 // ── Interaction Handler ─────────────────────────────────────────────────
@@ -1066,11 +1344,11 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			if m.User == nil || m.User.Bot { continue }
 			uid, _ := getOrCreateUser(m.User.ID, m.User.Username)
 			var isReg int
-			_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", m.User.ID).Scan(&isReg)
+			_ = queryRowDB("SELECT is_registered FROM users WHERE discord_id = ?", m.User.ID).Scan(&isReg)
 			if isReg == 1 {
 				if defaultRoleID != "" { _ = s.GuildMemberRoleAdd(guildID, m.User.ID, defaultRoleID) }
 				var nick string
-				_ = db.QueryRow("SELECT COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id=?", m.User.ID).Scan(&nick)
+				_ = queryRowDB("SELECT COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id=?", m.User.ID).Scan(&nick)
 				g, _ := s.Guild(guildID)
 				if g != nil && g.OwnerID != m.User.ID {
 					_ = s.GuildMemberNickname(guildID, m.User.ID, buildServerNick(uid, nick))
@@ -1127,9 +1405,9 @@ func handleNickname(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	uid, _ := getOrCreateUser(userID, i.Member.User.Username)
 	if gameID != "" {
-		_, _ = db.Exec("UPDATE users SET username = ?, game_nick = ?, game_id = ? WHERE discord_id = ?", nick, nick, gameID, userID)
+		_, _ = execDB("UPDATE users SET username = ?, game_nick = ?, game_id = ? WHERE discord_id = ?", nick, nick, gameID, userID)
 	} else {
-		_, _ = db.Exec("UPDATE users SET username = ?, game_nick = ? WHERE discord_id = ?", nick, nick, userID)
+		_, _ = execDB("UPDATE users SET username = ?, game_nick = ? WHERE discord_id = ?", nick, nick, userID)
 	}
 
 	guild, _ := s.Guild(i.GuildID)
@@ -1162,7 +1440,7 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	var elo, games, wins, losses, kills, deaths, assists, mvps int
 	var joinedAt string
 
-	err := db.QueryRow(`SELECT id, username, elo, games, wins, losses, kills, deaths, assists, mvps, joined_at 
+	err := queryRowDB(`SELECT id, username, elo, games, wins, losses, kills, deaths, assists, mvps, joined_at 
 		FROM users WHERE discord_id = ?`, targetUser.ID).Scan(&id, &username, &elo, &games, &wins, &losses, &kills, &deaths, &assists, &mvps, &joinedAt)
 
 	if err != nil {
@@ -1187,7 +1465,7 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	// Map stats
 	mapStatsText := ""
-	rows, err := db.Query("SELECT map_name, wins, losses, kills, deaths FROM map_stats WHERE user_id = ?", id)
+	rows, err := queryDB("SELECT map_name, wins, losses, kills, deaths FROM map_stats WHERE user_id = ?", id)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -1279,18 +1557,13 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		} else {
 			state.Turn = "T"
 		}
+		state.BanVersion++
 
 		remaining := getRemainingMaps(state.BannedMaps)
 
 		// If 1 map left — match starts
 		if len(remaining) == 1 {
 			finalMap := remaining[0]
-			db.Exec("UPDATE matches SET map_name = ?, status = 'playing' WHERE id = ?", finalMap.Name, matchID)
-
-			// Delete old pick/ban message
-			delete(activePickBans, i.ChannelID)
-
-			// Send match card
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseUpdateMessage,
 				Data: &discordgo.InteractionResponseData{
@@ -1299,135 +1572,7 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					Components: []discordgo.MessageComponent{},
 				},
 			})
-
-			// Find host (T captain)
-			hostMention := fmt.Sprintf("<@%s>", state.TCapID)
-
-			mentions := ""
-			for _, p := range append(state.TTeam, state.CTTeam...) {
-				mentions += fmt.Sprintf("<@%s> ", p.DiscordID)
-			}
-
-			embed := &discordgo.MessageEmbed{
-				Title:       fmt.Sprintf("#%d · %s %s", matchID, finalMap.Emoji, finalMap.Name),
-				Description: fmt.Sprintf("Игра идёт до **13 раундов**\n**Комнаты:** 🔒 Нет доступа · 🔒 Нет доступа — зайти может только свой состав\n*Ждём ссылку на лобби от хоста...*"),
-				Color:       0xe91e63,
-				Footer: &discordgo.MessageEmbedFooter{
-					Text: fmt.Sprintf("ID матча для отправки результата: %d • %s", matchID, time.Now().Format("02.01.2006 15:04")),
-				},
-			}
-
-			components := []discordgo.MessageComponent{
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.Button{
-							Label:    "Отправить ссылку на лобби",
-							Style:    discordgo.SuccessButton,
-							CustomID: fmt.Sprintf("lobby_link_%d", matchID),
-							Emoji:    &discordgo.ComponentEmoji{Name: "🔗"},
-						},
-						discordgo.Button{
-							Label:    "Получить ID хоста",
-							Style:    discordgo.PrimaryButton,
-							CustomID: fmt.Sprintf("hostid_%d_%s", matchID, state.TCapID),
-							Emoji:    &discordgo.ComponentEmoji{Name: "🆔"},
-						},
-						discordgo.Button{
-							Label:    "Игрок не зашёл (0/6)",
-							Style:    discordgo.DangerButton,
-							CustomID: fmt.Sprintf("noshow_%d", matchID),
-							Emoji:    &discordgo.ComponentEmoji{Name: "🚫"},
-						},
-					},
-				},
-			}
-
-			s.ChannelMessageSendComplex(i.ChannelID, &discordgo.MessageSend{
-				Content:    mentions,
-				Embeds:     []*discordgo.MessageEmbed{embed},
-				Components: components,
-			})
-
-			// Host message
-			s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби и нажми **Отправить ссылку на лобби**.", hostMention, matchID))
-
-			// Create T and CT voice channels — приватные, ТОЛЬКО для своей команды
-			ch, _ := s.Channel(i.ChannelID)
-			if ch != nil {
-				denyAll := int64(discordgo.PermissionViewChannel)
-				allowVoice := int64(discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
-
-				// Собираем роли админов заранее
-				adminRoleIDs := []string{}
-				allRoles, _ := s.GuildRoles(i.GuildID)
-				for _, r := range allRoles {
-					if r.Name == "Game Admin" || r.Name == "Ticket Admin" {
-						adminRoleIDs = append(adminRoleIDs, r.ID)
-					}
-				}
-
-				// Строим overwrite list для T канала
-				tOverwrites := []*discordgo.PermissionOverwrite{
-					{ID: i.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: denyAll},
-				}
-				for _, p := range state.TTeam {
-					tOverwrites = append(tOverwrites, &discordgo.PermissionOverwrite{
-						ID: p.DiscordID, Type: discordgo.PermissionOverwriteTypeMember, Allow: allowVoice,
-					})
-				}
-				for _, rid := range adminRoleIDs {
-					tOverwrites = append(tOverwrites, &discordgo.PermissionOverwrite{
-						ID: rid, Type: discordgo.PermissionOverwriteTypeRole, Allow: allowVoice,
-					})
-				}
-
-				// Строим overwrite list для CT канала
-				ctOverwrites := []*discordgo.PermissionOverwrite{
-					{ID: i.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: denyAll},
-				}
-				for _, p := range state.CTTeam {
-					ctOverwrites = append(ctOverwrites, &discordgo.PermissionOverwrite{
-						ID: p.DiscordID, Type: discordgo.PermissionOverwriteTypeMember, Allow: allowVoice,
-					})
-				}
-				for _, rid := range adminRoleIDs {
-					ctOverwrites = append(ctOverwrites, &discordgo.PermissionOverwrite{
-						ID: rid, Type: discordgo.PermissionOverwriteTypeRole, Allow: allowVoice,
-					})
-				}
-
-				parentID := ch.ParentID // Можно без родителя — войсы создаём без категории чтобы не наследовать права
-
-				tVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
-					Name:                 fmt.Sprintf("T │ Матч #%d", matchID),
-					Type:                 discordgo.ChannelTypeGuildVoice,
-					ParentID:             parentID,
-					UserLimit:            5,
-					PermissionOverwrites: tOverwrites,
-				})
-
-				ctVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
-					Name:                 fmt.Sprintf("CT │ Матч #%d", matchID),
-					Type:                 discordgo.ChannelTypeGuildVoice,
-					ParentID:             parentID,
-					UserLimit:            5,
-					PermissionOverwrites: ctOverwrites,
-				})
-
-				// Автоматически переместить игроков в свои войсы
-				time.Sleep(1 * time.Second)
-				if tVoice != nil {
-					for _, p := range state.TTeam {
-						_ = s.GuildMemberMove(i.GuildID, p.DiscordID, &tVoice.ID)
-					}
-				}
-				if ctVoice != nil {
-					for _, p := range state.CTTeam {
-						_ = s.GuildMemberMove(i.GuildID, p.DiscordID, &ctVoice.ID)
-					}
-				}
-			}
-
+			finalizeMatchStart(s, state, finalMap)
 			return
 		}
 
@@ -1455,6 +1600,7 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				Components: components,
 			},
 		})
+		scheduleAutoBan(s, state)
 		return
 	}
 
@@ -1462,7 +1608,7 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if customID == "login_existing" {
 		var isRegistered int
 		var gameNick string
-		_ = db.QueryRow("SELECT is_registered, COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered, &gameNick)
+		_ = queryRowDB("SELECT is_registered, COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered, &gameNick)
 
 		if isRegistered != 1 {
 			respondEphemeral(s, i, "❌ Ты не зарегистрирован. Нажми **Регистрация**.")
@@ -1495,7 +1641,7 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Registration button
 	if customID == "open_register" {
 		var isRegistered int
-		_ = db.QueryRow("SELECT is_registered FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered)
+		_ = queryRowDB("SELECT is_registered FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered)
 		if isRegistered == 1 {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -1533,7 +1679,7 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			hostDiscordID = parts[2]
 		}
 		hostGameID := ""
-		_ = db.QueryRow("SELECT game_id FROM users WHERE discord_id = ?", hostDiscordID).Scan(&hostGameID)
+		_ = queryRowDB("SELECT game_id FROM users WHERE discord_id = ?", hostDiscordID).Scan(&hostGameID)
 		if hostGameID == "" {
 			hostGameID = "не указан"
 		}
@@ -1623,7 +1769,7 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			return
 		}
 
-		_, err = db.Exec(
+		_, err = execDB(
 			"UPDATE users SET username = ?, game_nick = ?, game_id = ?, is_registered = 1 WHERE discord_id = ?",
 			nick, nick, gameID, i.Member.User.ID,
 		)
@@ -1672,7 +1818,7 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		var status string
-		err = db.QueryRow("SELECT status FROM matches WHERE id = ?", matchID).Scan(&status)
+		err = queryRowDB("SELECT status FROM matches WHERE id = ?", matchID).Scan(&status)
 		if err != nil {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -1708,7 +1854,7 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		_, _ = s.ChannelMessageSend(thread.ID, fmt.Sprintf("<@%s>, отправьте финальный скриншот матча #%d сюда.\nБот автоматически обработает статистику.", i.Member.User.ID, matchID))
-		_, _ = db.Exec("UPDATE matches SET status = 'reporting' WHERE id = ?", matchID)
+		_, _ = execDB("UPDATE matches SET status = 'reporting' WHERE id = ?", matchID)
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
