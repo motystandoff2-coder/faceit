@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -111,6 +112,20 @@ func main() {
 		log.Fatal("Error opening connection:", err)
 	}
 	defer session.Close()
+
+	// HTTP сервер для Fly.io health check (порт 8080)
+	go func() {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080"
+		}
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte("OK"))
+		})
+		log.Printf("HTTP health server on :%s", port)
+		http.ListenAndServe(":"+port, nil)
+	}()
 
 	fmt.Println("Bot is running. Press Ctrl+C to exit.")
 	sc := make(chan os.Signal, 1)

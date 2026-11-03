@@ -1,30 +1,16 @@
 app = "faceit"
-primary_region = "fra"
+primary_region = "ams"
 
-[build]
-  dockerfile = "Dockerfile"
-
-[env]
-  MIN_LOBBY_PLAYERS = "10"
-  DB_PATH = "/data"
-
-[mounts]
-  source = "bot_data"
-  destination = "/data"
-
-[processes]
-  app = "./bot"
-
-[[services]]
-  internal_port = 8080
-  protocol = "tcp"
-  auto_stop_machines = false
+[http_service]
   auto_start_machines = true
+  auto_stop_machines = false
+  force_https = true
+  internal_port = 8080
+  min_machines_running = 1
+  processes = [ "app" ]
 
-  [[services.ports]]
-    port = 8080
-
-  [[services.http_checks]]
-    interval = 30000
-    timeout = 5000
-    path = "/"
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"
+  memory_mb = 256
