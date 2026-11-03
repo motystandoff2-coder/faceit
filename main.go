@@ -836,15 +836,23 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 					Name: "ranked", Type: discordgo.ChannelTypeGuildText, ParentID: cat.ID,
 				})
+				// Пауза чтобы не ловить Rate Limit
+				time.Sleep(1 * time.Second)
+
 				_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 					Name: fmt.Sprintf("Lobby %d", lobbyNum), Type: discordgo.ChannelTypeGuildVoice,
 					ParentID: cat.ID, UserLimit: minPlayers,
 				})
 
-				time.Sleep(600 * time.Millisecond)
+				// Долгая пауза после всей категории (3 запроса)
+				time.Sleep(2 * time.Second)
+				
+				if globalPos % 5 == 0 {
+					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("⏳ Прогресс: построено лобби %d / 20...", globalPos))
+				}
 			}
 		}
-		_, _ = s.ChannelMessageSend(commandChannelID, "🏗️ Лиги созданы. Создаю блок результатов...")
+		_, _ = s.ChannelMessageSend(commandChannelID, "🏗️ Лиги созданы! Создаю блок результатов...")
 
 		// 6. SEND RESULT'S
 		resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
