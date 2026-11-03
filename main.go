@@ -1291,21 +1291,65 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			// Host message
 			s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби и нажми **Отправить ссылку на лобби**.", hostMention, matchID))
 
-			// Create T and CT voice channels in same category
+			// Create T and CT voice channels with permission overrides
 			ch, _ := s.Channel(i.ChannelID)
 			if ch != nil && ch.ParentID != "" {
-				s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
+				denyView := int64(discordgo.PermissionViewChannel)
+				allowVoice := int64(discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
+
+				// T voice channel — видят только T игроки + админы
+				tVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
 					Name:      fmt.Sprintf("T │ Матч #%d", matchID),
 					Type:      discordgo.ChannelTypeGuildVoice,
 					ParentID:  ch.ParentID,
 					UserLimit: 5,
 				})
-				s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
+				if tVoice != nil {
+					_ = s.ChannelPermissionSet(tVoice.ID, i.GuildID, discordgo.PermissionOverwriteTypeRole, 0, denyView)
+					for _, p := range state.TTeam {
+						_ = s.ChannelPermissionSet(tVoice.ID, p.DiscordID, discordgo.PermissionOverwriteTypeMember, allowVoice, 0)
+					}
+					// Админы видят
+					adminRoles, _ := s.GuildRoles(i.GuildID)
+					for _, r := range adminRoles {
+						if r.Name == "Game Admin" || r.Name == "Ticket Admin" {
+							_ = s.ChannelPermissionSet(tVoice.ID, r.ID, discordgo.PermissionOverwriteTypeRole, allowVoice, 0)
+						}
+					}
+				}
+
+				// CT voice channel — видят только CT игроки + админы
+				ctVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
 					Name:      fmt.Sprintf("CT │ Матч #%d", matchID),
 					Type:      discordgo.ChannelTypeGuildVoice,
 					ParentID:  ch.ParentID,
 					UserLimit: 5,
 				})
+				if ctVoice != nil {
+					_ = s.ChannelPermissionSet(ctVoice.ID, i.GuildID, discordgo.PermissionOverwriteTypeRole, 0, denyView)
+					for _, p := range state.CTTeam {
+						_ = s.ChannelPermissionSet(ctVoice.ID, p.DiscordID, discordgo.PermissionOverwriteTypeMember, allowVoice, 0)
+					}
+					adminRoles2, _ := s.GuildRoles(i.GuildID)
+					for _, r := range adminRoles2 {
+						if r.Name == "Game Admin" || r.Name == "Ticket Admin" {
+							_ = s.ChannelPermissionSet(ctVoice.ID, r.ID, discordgo.PermissionOverwriteTypeRole, allowVoice, 0)
+						}
+					}
+				}
+
+				// Автоматически переместить игроков в свои войсы
+				time.Sleep(1 * time.Second)
+				if tVoice != nil {
+					for _, p := range state.TTeam {
+						_ = s.GuildMemberMove(i.GuildID, p.DiscordID, &tVoice.ID)
+					}
+				}
+				if ctVoice != nil {
+					for _, p := range state.CTTeam {
+						_ = s.GuildMemberMove(i.GuildID, p.DiscordID, &ctVoice.ID)
+					}
+				}
 			}
 
 			return
