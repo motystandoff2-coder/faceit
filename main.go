@@ -845,12 +845,22 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		privateDeny  := int64(discordgo.PermissionViewChannel)
 		publicAllow  := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
 
-		// helper: выставить права на категорию
+		// helper: выставить права на категорию лиги
+		// @everyone: deny ViewChannel (полностью скрыто)
+		// Роль лиги: allow ViewChannel + Voice
+		// Game Admin / Ticket Admin: allow всё
 		setLeaguePerms := func(catID, leagueRole string) {
+			// Запретить @everyone видеть
 			_ = s.ChannelPermissionSet(catID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
+			// No registred тоже не видит
+			if noRegRoleID != "" {
+				_ = s.ChannelPermissionSet(catID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
+			}
+			// Роль лиги: видит и заходит
 			if rid := leagueRoleIDs[leagueRole]; rid != "" {
 				_ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
+			// Game Admin + Ticket Admin: всегда видят
 			if gameAdminRoleID != "" {
 				_ = s.ChannelPermissionSet(catID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
@@ -876,9 +886,23 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if regCat != nil {
 			allForReorder = append(allForReorder, chanPos{regCat.ID, globalPos})
 			globalPos++
+
+			// Видят только @everyone (незарегистрированные) и No registred
+			// Зарегистрированные (роли лиг) НЕ видят категорию регистрации
 			_ = s.ChannelPermissionSet(regCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, publicAllow, 0)
 			if noRegRoleID != "" {
 				_ = s.ChannelPermissionSet(regCat.ID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, publicAllow, 0)
+			}
+			// Скрыть от всех лиговых ролей (зарегистрированных)
+			for _, rid := range leagueRoleIDs {
+				_ = s.ChannelPermissionSet(regCat.ID, rid, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
+			}
+			// Скрыть от Game Admin / Ticket Admin (они и так видят лиги)
+			if gameAdminRoleID != "" {
+				_ = s.ChannelPermissionSet(regCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
+			}
+			if ticketAdminRoleID != "" {
+				_ = s.ChannelPermissionSet(regCat.ID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
 			}
 
 			regCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
@@ -888,12 +912,13 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				_, _ = s.ChannelMessageSendComplex(regCh.ID, &discordgo.MessageSend{
 					Embeds: []*discordgo.MessageEmbed{{
 						Title:       "🪪 РЕГИСТРАЦИЯ",
-						Description: "Добро пожаловать! Для доступа к лигам нужно зарегистрироваться.\n\n**Что нужно указать**\n› Игровой ник\n› Игровой ID\n\nИгровой ID будет использоваться для хоста лобби, если ты станешь хостом матча.",
+						Description: "Добро пожаловать! Для доступа к лигам нужно зарегистрироваться.\n\n**Что нужно указать**\n› Игровой ник (будет ником на сервере)\n› Игровой ID (для хоста лобби)\n\nЕсли уже зарегистрирован — нажми **Войти**.",
 						Color:       0x5865f2,
 					}},
 					Components: []discordgo.MessageComponent{
 						discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 							discordgo.Button{Label: "Регистрация", Style: discordgo.SuccessButton, CustomID: "open_register", Emoji: &discordgo.ComponentEmoji{Name: "🪪"}},
+							discordgo.Button{Label: "Войти", Style: discordgo.PrimaryButton, CustomID: "login_existing", Emoji: &discordgo.ComponentEmoji{Name: "🔑"}},
 						}},
 					},
 				})
@@ -1379,6 +1404,40 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				Components: components,
 			},
 		})
+		return
+	}
+
+	// Login button (для уже зарегистрированных)
+	if customID == "login_existing" {
+		var isRegistered int
+		var gameNick string
+		_ = db.QueryRow("SELECT is_registered, COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id = ?", i.Member.User.ID).Scan(&isRegistered, &gameNick)
+
+		if isRegistered != 1 {
+			respondEphemeral(s, i, "❌ Ты не зарегистрирован. Нажми **Регистрация**.")
+			return
+		}
+
+		uid, _ := getOrCreateUser(i.Member.User.ID, i.Member.User.Username)
+
+		// Восстановить роль Default League и убрать No registred
+		roles, _ := s.GuildRoles(i.GuildID)
+		for _, r := range roles {
+			if r.Name == "Default League" {
+				_ = s.GuildMemberRoleAdd(i.GuildID, i.Member.User.ID, r.ID)
+			}
+			if r.Name == "No registred" {
+				_ = s.GuildMemberRoleRemove(i.GuildID, i.Member.User.ID, r.ID)
+			}
+		}
+
+		// Восстановить ник
+		guild, _ := s.Guild(i.GuildID)
+		if guild != nil && guild.OwnerID != i.Member.User.ID {
+			_ = s.GuildMemberNickname(i.GuildID, i.Member.User.ID, buildServerNick(uid, gameNick))
+		}
+
+		respondEphemeral(s, i, fmt.Sprintf("✅ Добро пожаловать обратно! Твой ник: **%s**", buildServerNick(uid, gameNick)))
 		return
 	}
 
