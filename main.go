@@ -147,7 +147,7 @@ func main() {
 func initDB() {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
-		dbPath = "/data"
+		dbPath = "/app/data"
 	}
 	os.MkdirAll(dbPath, 0755)
 

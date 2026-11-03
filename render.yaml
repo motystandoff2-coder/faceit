@@ -8,8 +8,4 @@ services:
       - key: MIN_LOBBY_PLAYERS
         value: "10"
       - key: DB_PATH
-        value: "/data"
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1
+        value: "/app/data"
