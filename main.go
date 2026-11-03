@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 var (
 	db      *sql.DB
 	session *discordgo.Session
+
+	setupMu         sync.Mutex
+	setupInProgress = map[string]bool{}
 )
 
 // ── Maps ────────────────────────────────────────────────────────────────
@@ -672,6 +676,21 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // ── /setup ──────────────────────────────────────────────────────────────
 
 func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	setupMu.Lock()
+	if setupInProgress[i.GuildID] {
+		setupMu.Unlock()
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "⏳ Настройка уже идёт. Дождись завершения текущего /setup.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	setupInProgress[i.GuildID] = true
+	setupMu.Unlock()
+
 	// Сразу отвечаем — канал ещё существует
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -693,8 +712,12 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Всё в горутине
 	go func() {
 		defer func() {
+			setupMu.Lock()
+			delete(setupInProgress, guildID)
+			setupMu.Unlock()
 			if r := recover(); r != nil {
 				log.Printf("PANIC in setup goroutine: %v", r)
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Паника в setup: %v", r))
 			}
 		}()
 
@@ -786,6 +809,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		})
 		if regErr != nil {
 			log.Println("[SETUP] Error creating REGISTRATION category:", regErr)
+			_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка создания REGISTRATION: %v", regErr))
 		}
 		if regCat != nil {
 			allForReorder = append(allForReorder, chanPos{regCat.ID, globalPos})
@@ -821,11 +845,14 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			for _, lobbyNum := range league.Lobbies {
 				catName := fmt.Sprintf("| %s", league.Name)
 				log.Printf("[SETUP] Creating category: %s (Lobby %d)", catName, lobbyNum)
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("📁 Создаю %s / Lobby %d", league.Name, lobbyNum))
+
 				cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 					Name: catName, Type: discordgo.ChannelTypeGuildCategory,
 				})
 				if err != nil || cat == nil {
 					log.Printf("[SETUP] Error creating %s Lobby %d: %v", catName, lobbyNum, err)
+					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка категории %s / Lobby %d: %v", league.Name, lobbyNum, err))
 					continue
 				}
 				allForReorder = append(allForReorder, chanPos{cat.ID, globalPos})
@@ -833,23 +860,27 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 				setLeaguePerms(cat.ID, league.RoleName)
 
-				_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+				rankedCh, rankedErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 					Name: "ranked", Type: discordgo.ChannelTypeGuildText, ParentID: cat.ID,
 				})
-				// Пауза чтобы не ловить Rate Limit
+				if rankedErr != nil || rankedCh == nil {
+					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка ranked в %s / Lobby %d: %v", league.Name, lobbyNum, rankedErr))
+					continue
+				}
+
 				time.Sleep(1 * time.Second)
 
-				_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+				voiceCh, voiceErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 					Name: fmt.Sprintf("Lobby %d", lobbyNum), Type: discordgo.ChannelTypeGuildVoice,
 					ParentID: cat.ID, UserLimit: minPlayers,
 				})
-
-				// Долгая пауза после всей категории (3 запроса)
-				time.Sleep(2 * time.Second)
-				
-				if globalPos % 5 == 0 {
-					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("⏳ Прогресс: построено лобби %d / 20...", globalPos))
+				if voiceErr != nil || voiceCh == nil {
+					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка Lobby %d в %s: %v", lobbyNum, league.Name, voiceErr))
+					continue
 				}
+
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("✅ Создано %s / Lobby %d", league.Name, lobbyNum))
+				time.Sleep(2 * time.Second)
 			}
 		}
 		_, _ = s.ChannelMessageSend(commandChannelID, "🏗️ Лиги созданы! Создаю блок результатов...")
