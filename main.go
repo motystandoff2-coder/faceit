@@ -653,10 +653,25 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	// Всё в горутине
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in setup goroutine: %v", r)
+			}
+		}()
+
+		log.Println("[SETUP] Starting setup for guild:", guildID)
+
 		// 1. Удалить все каналы
-		existingChs, _ := s.GuildChannels(guildID)
-		for _, ch := range existingChs {
-			_, _ = s.ChannelDelete(ch.ID)
+		existingChs, err := s.GuildChannels(guildID)
+		if err != nil {
+			log.Println("[SETUP] Error getting channels:", err)
+		} else {
+			log.Printf("[SETUP] Deleting %d channels...", len(existingChs))
+			for _, ch := range existingChs {
+				if _, err := s.ChannelDelete(ch.ID); err != nil {
+					log.Printf("[SETUP] Error deleting channel %s: %v", ch.Name, err)
+				}
+			}
 		}
 		time.Sleep(2 * time.Second)
 
@@ -713,10 +728,14 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		var allForReorder []chanPos
 		globalPos := 0
 
+		log.Println("[SETUP] Creating REGISTRATION category...")
 		// 4. REGISTRATION (один раз, до лиг)
-		regCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-			Name: "🪪 | REGISTRATION", Type: discordgo.ChannelTypeGuildCategory,
+		regCat, regErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+			Name: "REGISTRATION", Type: discordgo.ChannelTypeGuildCategory,
 		})
+		if regErr != nil {
+			log.Println("[SETUP] Error creating REGISTRATION category:", regErr)
+		}
 		if regCat != nil {
 			allForReorder = append(allForReorder, chanPos{regCat.ID, globalPos})
 			globalPos++
@@ -745,15 +764,18 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		time.Sleep(500 * time.Millisecond)
 
+		log.Println("[SETUP] Creating league categories...")
 		// 5. Лиги — каждая лига/лобби = отдельная категория
 		for _, league := range LeagueConfig {
 			for _, lobbyNum := range league.Lobbies {
-				catName := fmt.Sprintf("%s | %s", league.Emoji, league.Name)
+				// Убираем эмодзи из имени категории — только ASCII
+				catName := fmt.Sprintf("| %s", league.Name)
+				log.Printf("[SETUP] Creating category: %s (Lobby %d)", catName, lobbyNum)
 				cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 					Name: catName, Type: discordgo.ChannelTypeGuildCategory,
 				})
 				if err != nil || cat == nil {
-					log.Printf("Error creating %s Lobby %d: %v", catName, lobbyNum, err)
+					log.Printf("[SETUP] Error creating %s Lobby %d: %v", catName, lobbyNum, err)
 					continue
 				}
 				allForReorder = append(allForReorder, chanPos{cat.ID, globalPos})
