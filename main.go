@@ -147,7 +147,7 @@ func main() {
 func initDB() {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
-		dbPath = "./data"
+		dbPath = "/data" // Fly.io volume mount path
 	}
 	os.MkdirAll(dbPath, 0755)
 
@@ -1316,52 +1316,68 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			// Host message
 			s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби и нажми **Отправить ссылку на лобби**.", hostMention, matchID))
 
-			// Create T and CT voice channels with permission overrides
+			// Create T and CT voice channels — приватные, ТОЛЬКО для своей команды
 			ch, _ := s.Channel(i.ChannelID)
-			if ch != nil && ch.ParentID != "" {
-				denyView := int64(discordgo.PermissionViewChannel)
+			if ch != nil {
+				denyAll := int64(discordgo.PermissionViewChannel)
 				allowVoice := int64(discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
 
-				// T voice channel — видят только T игроки + админы
-				tVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
-					Name:      fmt.Sprintf("T │ Матч #%d", matchID),
-					Type:      discordgo.ChannelTypeGuildVoice,
-					ParentID:  ch.ParentID,
-					UserLimit: 5,
-				})
-				if tVoice != nil {
-					_ = s.ChannelPermissionSet(tVoice.ID, i.GuildID, discordgo.PermissionOverwriteTypeRole, 0, denyView)
-					for _, p := range state.TTeam {
-						_ = s.ChannelPermissionSet(tVoice.ID, p.DiscordID, discordgo.PermissionOverwriteTypeMember, allowVoice, 0)
-					}
-					// Админы видят
-					adminRoles, _ := s.GuildRoles(i.GuildID)
-					for _, r := range adminRoles {
-						if r.Name == "Game Admin" || r.Name == "Ticket Admin" {
-							_ = s.ChannelPermissionSet(tVoice.ID, r.ID, discordgo.PermissionOverwriteTypeRole, allowVoice, 0)
-						}
+				// Собираем роли админов заранее
+				adminRoleIDs := []string{}
+				allRoles, _ := s.GuildRoles(i.GuildID)
+				for _, r := range allRoles {
+					if r.Name == "Game Admin" || r.Name == "Ticket Admin" {
+						adminRoleIDs = append(adminRoleIDs, r.ID)
 					}
 				}
 
-				// CT voice channel — видят только CT игроки + админы
-				ctVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
-					Name:      fmt.Sprintf("CT │ Матч #%d", matchID),
-					Type:      discordgo.ChannelTypeGuildVoice,
-					ParentID:  ch.ParentID,
-					UserLimit: 5,
-				})
-				if ctVoice != nil {
-					_ = s.ChannelPermissionSet(ctVoice.ID, i.GuildID, discordgo.PermissionOverwriteTypeRole, 0, denyView)
-					for _, p := range state.CTTeam {
-						_ = s.ChannelPermissionSet(ctVoice.ID, p.DiscordID, discordgo.PermissionOverwriteTypeMember, allowVoice, 0)
-					}
-					adminRoles2, _ := s.GuildRoles(i.GuildID)
-					for _, r := range adminRoles2 {
-						if r.Name == "Game Admin" || r.Name == "Ticket Admin" {
-							_ = s.ChannelPermissionSet(ctVoice.ID, r.ID, discordgo.PermissionOverwriteTypeRole, allowVoice, 0)
-						}
-					}
+				// Строим overwrite list для T канала
+				tOverwrites := []*discordgo.PermissionOverwrite{
+					{ID: i.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: denyAll},
 				}
+				for _, p := range state.TTeam {
+					tOverwrites = append(tOverwrites, &discordgo.PermissionOverwrite{
+						ID: p.DiscordID, Type: discordgo.PermissionOverwriteTypeMember, Allow: allowVoice,
+					})
+				}
+				for _, rid := range adminRoleIDs {
+					tOverwrites = append(tOverwrites, &discordgo.PermissionOverwrite{
+						ID: rid, Type: discordgo.PermissionOverwriteTypeRole, Allow: allowVoice,
+					})
+				}
+
+				// Строим overwrite list для CT канала
+				ctOverwrites := []*discordgo.PermissionOverwrite{
+					{ID: i.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: denyAll},
+				}
+				for _, p := range state.CTTeam {
+					ctOverwrites = append(ctOverwrites, &discordgo.PermissionOverwrite{
+						ID: p.DiscordID, Type: discordgo.PermissionOverwriteTypeMember, Allow: allowVoice,
+					})
+				}
+				for _, rid := range adminRoleIDs {
+					ctOverwrites = append(ctOverwrites, &discordgo.PermissionOverwrite{
+						ID: rid, Type: discordgo.PermissionOverwriteTypeRole, Allow: allowVoice,
+					})
+				}
+
+				parentID := ch.ParentID // Можно без родителя — войсы создаём без категории чтобы не наследовать права
+
+				tVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
+					Name:                 fmt.Sprintf("T │ Матч #%d", matchID),
+					Type:                 discordgo.ChannelTypeGuildVoice,
+					ParentID:             parentID,
+					UserLimit:            5,
+					PermissionOverwrites: tOverwrites,
+				})
+
+				ctVoice, _ := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
+					Name:                 fmt.Sprintf("CT │ Матч #%d", matchID),
+					Type:                 discordgo.ChannelTypeGuildVoice,
+					ParentID:             parentID,
+					UserLimit:            5,
+					PermissionOverwrites: ctOverwrites,
+				})
 
 				// Автоматически переместить игроков в свои войсы
 				time.Sleep(1 * time.Second)

@@ -14,3 +14,7 @@ primary_region = "ams"
   cpus = 1
   memory = "1gb"
   memory_mb = 256
+
+[mounts]
+  source = "bot_data"
+  destination = "/data"
