@@ -842,25 +842,32 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		_, _ = s.ChannelMessageSend(commandChannelID, "🎭 Роли созданы. Начинаю строить категории...")
 
 		privateAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
-		privateDeny  := int64(discordgo.PermissionViewChannel)
-		publicAllow  := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
+		privateDeny := int64(discordgo.PermissionViewChannel)
+		publicAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
+		viewOnlyAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory)
 
-		// helper: выставить права на категорию лиги
-		// @everyone: deny ViewChannel (полностью скрыто)
-		// Роль лиги: allow ViewChannel + Voice
-		// Game Admin / Ticket Admin: allow всё
+		// helper: права на категорию лиги
+		// - незарегистрированные не видят
+		// - зарегистрированные лиги видят ВСЕ категории
+		// - только нужная роль лиги может писать/заходить
 		setLeaguePerms := func(catID, leagueRole string) {
-			// Запретить @everyone видеть
+			// Базово скрыть от @everyone и No registred
 			_ = s.ChannelPermissionSet(catID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			// No registred тоже не видит
 			if noRegRoleID != "" {
 				_ = s.ChannelPermissionSet(catID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
 			}
-			// Роль лиги: видит и заходит
+
+			// Все зарегистрированные лиги видят все категории, но без доступа к войсу/отправке
+			for _, rid := range leagueRoleIDs {
+				_ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, viewOnlyAllow, 0)
+			}
+
+			// Конкретная роль лиги получает полный доступ
 			if rid := leagueRoleIDs[leagueRole]; rid != "" {
 				_ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
-			// Game Admin + Ticket Admin: всегда видят
+
+			// Админы всегда видят и заходят
 			if gameAdminRoleID != "" {
 				_ = s.ChannelPermissionSet(catID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
