@@ -271,6 +271,29 @@ func buildServerNick(id int, nick string) string {
 	return fmt.Sprintf("#%d | %s", id, nick)
 }
 
+func isManagedChannelName(name string) bool {
+	managedExact := map[string]bool{
+		"REGISTRATION": true,
+		"🪪│регистрация": true,
+		"📍 | SEND RESULT'S": true,
+		"📌│отправить-результаты": true,
+		"📊│история-игр": true,
+		"📁│приоритет-игр": true,
+		"📁│обычный-рег": true,
+		"ranked": true,
+	}
+	if managedExact[name] {
+		return true
+	}
+	if strings.HasPrefix(name, "Lobby ") {
+		return true
+	}
+	if strings.Contains(name, "PRO LEAGUE") || strings.Contains(name, "PRO REMASTERED") || strings.Contains(name, "DIVISION LEAGUE") || strings.Contains(name, "DIVISION REMASTERED") || strings.Contains(name, "PROSPECT LEAGUE") || strings.Contains(name, "PROSPECT REMASTERED") || strings.Contains(name, "DEFAULT LEAGUE") || strings.Contains(name, "DEFAULT REMASTERED") {
+		return true
+	}
+	return false
+}
+
 func onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 	_, err := getOrCreateUser(m.User.ID, m.User.Username)
 	if err != nil {
@@ -644,6 +667,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 
 	guildID := i.GuildID
+	commandChannelID := i.ChannelID
 	minPlayers := 10
 	if mp := os.Getenv("MIN_LOBBY_PLAYERS"); mp != "" {
 		if n, err := strconv.Atoi(mp); err == nil && n > 0 {
@@ -660,19 +684,30 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}()
 
 		log.Println("[SETUP] Starting setup for guild:", guildID)
+		_, _ = s.ChannelMessageSend(commandChannelID, "⚙️ Начинаю очистку старой структуры бота...")
 
-		// 1. Удалить все каналы
+		// 1. Удалить только каналы/категории, которыми управляет бот
 		existingChs, err := s.GuildChannels(guildID)
 		if err != nil {
 			log.Println("[SETUP] Error getting channels:", err)
-		} else {
-			log.Printf("[SETUP] Deleting %d channels...", len(existingChs))
-			for _, ch := range existingChs {
-				if _, err := s.ChannelDelete(ch.ID); err != nil {
-					log.Printf("[SETUP] Error deleting channel %s: %v", ch.Name, err)
-				}
+			_, _ = s.ChannelMessageSend(commandChannelID, "❌ Не удалось получить список каналов сервера.")
+			return
+		}
+		deletedCount := 0
+		for _, ch := range existingChs {
+			if ch.ID == commandChannelID {
+				continue
+			}
+			if !isManagedChannelName(ch.Name) {
+				continue
+			}
+			if _, err := s.ChannelDelete(ch.ID); err != nil {
+				log.Printf("[SETUP] Error deleting channel %s: %v", ch.Name, err)
+			} else {
+				deletedCount++
 			}
 		}
+		_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("🧹 Удалено каналов/категорий: %d", deletedCount))
 		time.Sleep(2 * time.Second)
 
 		// 2. Удалить старые роли бота
@@ -704,6 +739,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				leagueRoleIDs[lr] = role.ID
 			}
 		}
+		_, _ = s.ChannelMessageSend(commandChannelID, "🎭 Роли созданы. Начинаю строить категории...")
 
 		privateAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
 		privateDeny  := int64(discordgo.PermissionViewChannel)
@@ -768,7 +804,6 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// 5. Лиги — каждая лига/лобби = отдельная категория
 		for _, league := range LeagueConfig {
 			for _, lobbyNum := range league.Lobbies {
-				// Убираем эмодзи из имени категории — только ASCII
 				catName := fmt.Sprintf("| %s", league.Name)
 				log.Printf("[SETUP] Creating category: %s (Lobby %d)", catName, lobbyNum)
 				cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
@@ -791,10 +826,10 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					ParentID: cat.ID, UserLimit: minPlayers,
 				})
 
-				// Небольшая пауза между созданием категорий
 				time.Sleep(600 * time.Millisecond)
 			}
 		}
+		_, _ = s.ChannelMessageSend(commandChannelID, "🏗️ Лиги созданы. Создаю блок результатов...")
 
 		// 6. SEND RESULT'S
 		resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
@@ -870,6 +905,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		log.Printf("Setup complete for guild %s (%d categories)", guildID, globalPos)
+		_, _ = s.ChannelMessageSend(commandChannelID, "✅ Настройка завершена. Если порядок всё ещё поедет — теперь в этом канале виден прогресс и можно точно понять этап ошибки.")
 	}()
 }
 
