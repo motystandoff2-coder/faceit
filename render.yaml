@@ -6,9 +6,9 @@ services:
       - key: DISCORD_TOKEN
         sync: false
       - key: MIN_LOBBY_PLAYERS
-        value: 10
+        value: "10"
       - key: DB_PATH
-        value: /data
+        value: "/data"
     disk:
       name: bot-data
       mountPath: /data
