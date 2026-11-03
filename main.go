@@ -1005,27 +1005,20 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		setupMu.Unlock()
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "⏳ Настройка уже идёт. Дождись завершения текущего /setup.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
+			Data: &discordgo.InteractionResponseData{Content: "⏳ Настройка уже идёт.", Flags: discordgo.MessageFlagsEphemeral},
 		})
 		return
 	}
 	setupInProgress[i.GuildID] = true
 	setupMu.Unlock()
 
-	// Сразу отвечаем — канал ещё существует
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "⏳ Настройка запущена. Каналы будут созданы через несколько секунд...",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+		Data: &discordgo.InteractionResponseData{Content: "⏳ Проверяю и обновляю структуру сервера...", Flags: discordgo.MessageFlagsEphemeral},
 	})
 
 	guildID := i.GuildID
-	commandChannelID := i.ChannelID
+	cmdCh := i.ChannelID
 	minPlayers := 10
 	if mp := os.Getenv("MIN_LOBBY_PLAYERS"); mp != "" {
 		if n, err := strconv.Atoi(mp); err == nil && n > 0 {
@@ -1033,311 +1026,158 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
-	// Всё в горутине
 	go func() {
 		defer func() {
-			setupMu.Lock()
-			delete(setupInProgress, guildID)
-			setupMu.Unlock()
-			if r := recover(); r != nil {
-				log.Printf("PANIC in setup goroutine: %v", r)
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Паника в setup: %v", r))
-			}
+			setupMu.Lock(); delete(setupInProgress, guildID); setupMu.Unlock()
+			if r := recover(); r != nil { log.Printf("PANIC setup: %v", r) }
 		}()
 
-		log.Println("[SETUP] Starting setup for guild:", guildID)
-
-		// 0. Проверка: Discord сейчас вообще разрешает создавать каналы?
-		if waitFor, err := probeChannelCreateAvailability(s, guildID); err != nil {
-			if err.Error() == "rate_limited" {
-				hours := int(waitFor.Hours())
-				mins := int(waitFor.Minutes()) % 60
-				msg := fmt.Sprintf("❌ Discord временно заблокировал создание каналов для этого бота.\n⏳ Подожди примерно: **%d ч %d мин**\n\nПричина: слишком много операций создания/удаления каналов за короткое время.", hours, mins)
-				_, _ = s.ChannelMessageSend(commandChannelID, msg)
-				log.Printf("[SETUP] Channel creation cooldown active: %v", waitFor)
-				return
-			}
-			_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Не удалось проверить возможность создания каналов: %v", err))
-			log.Printf("[SETUP] Probe error: %v", err)
-			return
-		}
-
-		_, _ = s.ChannelMessageSend(commandChannelID, "⚙️ Начинаю очистку старой структуры бота...")
-
-		// 1. Удалить только каналы/категории, которыми управляет бот
 		existingChs, err := s.GuildChannels(guildID)
-		if err != nil {
-			log.Println("[SETUP] Error getting channels:", err)
-			_, _ = s.ChannelMessageSend(commandChannelID, "❌ Не удалось получить список каналов сервера.")
-			return
-		}
-		deletedCount := 0
-		for _, ch := range existingChs {
-			if ch.ID == commandChannelID {
-				continue
-			}
-			if !isManagedChannelName(ch.Name) {
-				continue
-			}
-			if _, err := s.ChannelDelete(ch.ID); err != nil {
-				log.Printf("[SETUP] Error deleting channel %s: %v", ch.Name, err)
-			} else {
-				deletedCount++
-			}
-		}
-		_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("🧹 Удалено каналов/категорий: %d", deletedCount))
-		time.Sleep(2 * time.Second)
-
-		// 2. Удалить старые роли бота
-		botRoleNames := map[string]bool{"No registred": true, "Registered": true, "Game Admin": true, "Ticket Admin": true}
-		for _, lr := range LeagueRoles {
-			botRoleNames[lr] = true
-		}
+		if err != nil { _, _ = s.ChannelMessageSend(cmdCh, "Не удалось получить каналы."); return }
 		existingRoles, _ := s.GuildRoles(guildID)
-		for _, r := range existingRoles {
-			if botRoleNames[r.Name] {
-				_ = s.GuildRoleDelete(guildID, r.ID)
+		roleByName := map[string]*discordgo.Role{}
+		for _, r := range existingRoles { roleByName[r.Name] = r }
+
+		ensureRole := func(name string) string {
+			if r, ok := roleByName[name]; ok { return r.ID }
+			r, err := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: name})
+			if err != nil || r == nil { return "" }
+			roleByName[name] = r
+			return r.ID
+		}
+		noRegRoleID     := ensureRole("No registred")
+		gameAdminRoleID := ensureRole("Game Admin")
+		tickAdminRoleID := ensureRole("Ticket Admin")
+		leagueRoleIDs   := map[string]string{}
+		for _, lr := range LeagueRoles { leagueRoleIDs[lr] = ensureRole(lr) }
+
+		denyAll    := int64(discordgo.PermissionViewChannel)
+		viewOnly   := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory)
+		fullAccess := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages |
+			discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect |
+			discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
+		pubWrite   := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
+
+		applyLeagueCatPerms := func(catID, ownerRole string) {
+			_ = s.ChannelPermissionSet(catID, guildID, discordgo.PermissionOverwriteTypeRole, 0, denyAll)
+			if noRegRoleID != "" { _ = s.ChannelPermissionSet(catID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+			for _, rid := range leagueRoleIDs { _ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, viewOnly, 0) }
+			if rid := leagueRoleIDs[ownerRole]; rid != "" { _ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+			if gameAdminRoleID != "" { _ = s.ChannelPermissionSet(catID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+			if tickAdminRoleID != "" { _ = s.ChannelPermissionSet(catID, tickAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+		}
+
+		applyRankedPerms := func(id string) {
+			_ = s.ChannelPermissionSet(id, guildID, discordgo.PermissionOverwriteTypeRole,
+				int64(discordgo.PermissionViewChannel|discordgo.PermissionReadMessageHistory),
+				int64(discordgo.PermissionSendMessages))
+			if session.State != nil && session.State.User != nil {
+				_ = s.ChannelPermissionSet(id, session.State.User.ID, discordgo.PermissionOverwriteTypeMember,
+					int64(discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionReadMessageHistory|discordgo.PermissionEmbedLinks), 0)
 			}
 		}
 
-		// 3. Создать роли
-		noRegRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "No registred"})
-		gameAdminRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Game Admin"})
-		ticketAdminRole, _ := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: "Ticket Admin"})
-
-		noRegRoleID, gameAdminRoleID, ticketAdminRoleID := "", "", ""
-		if noRegRole != nil { noRegRoleID = noRegRole.ID }
-		if gameAdminRole != nil { gameAdminRoleID = gameAdminRole.ID }
-		if ticketAdminRole != nil { ticketAdminRoleID = ticketAdminRole.ID }
-
-		leagueRoleIDs := map[string]string{}
-		for _, lr := range LeagueRoles {
-			role, err := s.GuildRoleCreate(guildID, &discordgo.RoleParams{Name: lr})
-			if err == nil && role != nil {
-				leagueRoleIDs[lr] = role.ID
-			}
+		ensureCat := func(name string) (*discordgo.Channel, bool) {
+			for _, ch := range existingChs { if ch.Name == name && ch.Type == discordgo.ChannelTypeGuildCategory { return ch, false } }
+			cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: name, Type: discordgo.ChannelTypeGuildCategory})
+			if err != nil { return nil, false }
+			time.Sleep(300 * time.Millisecond)
+			return cat, true
 		}
-		_, _ = s.ChannelMessageSend(commandChannelID, "🎭 Роли созданы. Начинаю строить категории...")
-
-		privateAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
-		privateDeny := int64(discordgo.PermissionViewChannel)
-		publicAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
-		viewOnlyAllow := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory)
-
-		// helper: права на категорию лиги
-		// - незарегистрированные не видят
-		// - зарегистрированные лиги видят ВСЕ категории
-		// - только нужная роль лиги может писать/заходить
-		setLeaguePerms := func(catID, leagueRole string) {
-			// Базово скрыть от @everyone и No registred
-			_ = s.ChannelPermissionSet(catID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			if noRegRoleID != "" {
-				_ = s.ChannelPermissionSet(catID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			}
-
-			// Все зарегистрированные лиги видят все категории, но без доступа к войсу/отправке
-			for _, rid := range leagueRoleIDs {
-				_ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, viewOnlyAllow, 0)
-			}
-
-			// Конкретная роль лиги получает полный доступ
-			if rid := leagueRoleIDs[leagueRole]; rid != "" {
-				_ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
-			}
-
-			// Админы всегда видят и заходят
-			if gameAdminRoleID != "" {
-				_ = s.ChannelPermissionSet(catID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
-			}
-			if ticketAdminRoleID != "" {
-				_ = s.ChannelPermissionSet(catID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
-			}
+		ensureText := func(name, parentID string) (*discordgo.Channel, bool) {
+			for _, ch := range existingChs { if ch.Name == name && ch.Type == discordgo.ChannelTypeGuildText && ch.ParentID == parentID { return ch, false } }
+			ch, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: name, Type: discordgo.ChannelTypeGuildText, ParentID: parentID})
+			if err != nil { return nil, false }
+			return ch, true
+		}
+		ensureVoice := func(name, parentID string, limit int) {
+			for _, ch := range existingChs { if ch.Name == name && ch.Type == discordgo.ChannelTypeGuildVoice && ch.ParentID == parentID { return } }
+			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: name, Type: discordgo.ChannelTypeGuildVoice, ParentID: parentID, UserLimit: limit})
 		}
 
-		// Финальный список для reorder: []{ID, globalPos}
-		type chanPos struct{ id string; pos int }
-		var allForReorder []chanPos
-		globalPos := 0
+		var reorderList []*discordgo.Channel
+		pos := 0
 
-		log.Println("[SETUP] Creating REGISTRATION category...")
-		// 4. REGISTRATION (один раз, до лиг)
-		regCat, regErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-			Name: "REGISTRATION", Type: discordgo.ChannelTypeGuildCategory,
-		})
-		if regErr != nil {
-			log.Println("[SETUP] Error creating REGISTRATION category:", regErr)
-			_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка создания REGISTRATION: %v", regErr))
-		}
+		// REGISTRATION
+		regCat, _ := ensureCat("REGISTRATION")
 		if regCat != nil {
-			allForReorder = append(allForReorder, chanPos{regCat.ID, globalPos})
-			globalPos++
-
-			// Видят только @everyone (незарегистрированные) и No registred
-			// Зарегистрированные (роли лиг) НЕ видят категорию регистрации
-			_ = s.ChannelPermissionSet(regCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, publicAllow, 0)
-			if noRegRoleID != "" {
-				_ = s.ChannelPermissionSet(regCat.ID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, publicAllow, 0)
-			}
-			// Скрыть от всех лиговых ролей (зарегистрированных)
-			for _, rid := range leagueRoleIDs {
-				_ = s.ChannelPermissionSet(regCat.ID, rid, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			}
-			// Скрыть от Game Admin / Ticket Admin (они и так видят лиги)
-			if gameAdminRoleID != "" {
-				_ = s.ChannelPermissionSet(regCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			}
-			if ticketAdminRoleID != "" {
-				_ = s.ChannelPermissionSet(regCat.ID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			}
-
-			regCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-				Name: "🪪│регистрация", Type: discordgo.ChannelTypeGuildText, ParentID: regCat.ID,
-			})
-			if regCh != nil {
+			reorderList = append(reorderList, &discordgo.Channel{ID: regCat.ID, Position: pos}); pos++
+			_ = s.ChannelPermissionSet(regCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, pubWrite, 0)
+			if noRegRoleID != "" { _ = s.ChannelPermissionSet(regCat.ID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, pubWrite, 0) }
+			for _, rid := range leagueRoleIDs { _ = s.ChannelPermissionSet(regCat.ID, rid, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+			if gameAdminRoleID != "" { _ = s.ChannelPermissionSet(regCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+			if tickAdminRoleID != "" { _ = s.ChannelPermissionSet(regCat.ID, tickAdminRoleID, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+			regCh, created := ensureText("🪪│регистрация", regCat.ID)
+			if regCh != nil && created {
 				_, _ = s.ChannelMessageSendComplex(regCh.ID, &discordgo.MessageSend{
-					Embeds: []*discordgo.MessageEmbed{{
-						Title:       "🪪 РЕГИСТРАЦИЯ",
-						Description: "Добро пожаловать! Для доступа к лигам нужно зарегистрироваться.\n\n**Что нужно указать**\n› Игровой ник (будет ником на сервере)\n› Игровой ID (для хоста лобби)\n\nЕсли уже зарегистрирован — нажми **Войти**.",
-						Color:       0x5865f2,
+					Embeds: []*discordgo.MessageEmbed{{Title: "🪪 РЕГИСТРАЦИЯ", Color: 0x5865f2,
+						Description: "Добро пожаловать!\n\n› Игровой ник (ник на сервере)\n› Игровой ID (для хоста лобби)\n\nЕсли уже зарегистрирован — **Войти**.",
 					}},
-					Components: []discordgo.MessageComponent{
-						discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-							discordgo.Button{Label: "Регистрация", Style: discordgo.SuccessButton, CustomID: "open_register", Emoji: &discordgo.ComponentEmoji{Name: "🪪"}},
-							discordgo.Button{Label: "Войти", Style: discordgo.PrimaryButton, CustomID: "login_existing", Emoji: &discordgo.ComponentEmoji{Name: "🔑"}},
-						}},
-					},
+					Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						discordgo.Button{Label: "Регистрация", Style: discordgo.SuccessButton, CustomID: "open_register", Emoji: &discordgo.ComponentEmoji{Name: "🪪"}},
+						discordgo.Button{Label: "Войти", Style: discordgo.PrimaryButton, CustomID: "login_existing", Emoji: &discordgo.ComponentEmoji{Name: "🔑"}},
+					}}},
 				})
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
 
-		log.Println("[SETUP] Creating league categories...")
-		// 5. Лиги — каждая лига/лобби = отдельная категория
+		// Лиги
 		for _, league := range LeagueConfig {
 			for _, lobbyNum := range league.Lobbies {
 				catName := fmt.Sprintf("%s | %s", league.Emoji, league.Name)
-				log.Printf("[SETUP] Creating category: %s (Lobby %d)", catName, lobbyNum)
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("📁 Создаю %s / Lobby %d", league.Name, lobbyNum))
-
-				cat, err := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-					Name: catName, Type: discordgo.ChannelTypeGuildCategory,
-				})
-				if err != nil || cat == nil {
-					log.Printf("[SETUP] Error creating %s Lobby %d: %v", catName, lobbyNum, err)
-					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка категории %s / Lobby %d: %v", league.Name, lobbyNum, err))
-					continue
-				}
-				allForReorder = append(allForReorder, chanPos{cat.ID, globalPos})
-				globalPos++
-
-				setLeaguePerms(cat.ID, league.RoleName)
-
-				rankedCh, rankedErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-					Name: "ranked", Type: discordgo.ChannelTypeGuildText, ParentID: cat.ID,
-				})
-				if rankedErr != nil || rankedCh == nil {
-					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка ranked в %s / Lobby %d: %v", league.Name, lobbyNum, rankedErr))
-					continue
-				}
-				// Запретить всем писать в ranked — только бот пишет
-				_ = s.ChannelPermissionSet(rankedCh.ID, guildID, discordgo.PermissionOverwriteTypeRole,
-					int64(discordgo.PermissionViewChannel|discordgo.PermissionReadMessageHistory),
-					int64(discordgo.PermissionSendMessages))
-				// Бот может писать
-				if session.State != nil && session.State.User != nil {
-					_ = s.ChannelPermissionSet(rankedCh.ID, session.State.User.ID, discordgo.PermissionOverwriteTypeMember,
-						int64(discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionReadMessageHistory|discordgo.PermissionEmbedLinks), 0)
-				}
-
-				time.Sleep(1 * time.Second)
-
-				voiceCh, voiceErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-					Name: fmt.Sprintf("Lobby %d", lobbyNum), Type: discordgo.ChannelTypeGuildVoice,
-					ParentID: cat.ID, UserLimit: minPlayers,
-				})
-				if voiceErr != nil || voiceCh == nil {
-					_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка Lobby %d в %s: %v", lobbyNum, league.Name, voiceErr))
-					continue
-				}
-
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("✅ Создано %s / Lobby %d", league.Name, lobbyNum))
-				time.Sleep(2 * time.Second)
+				cat, created := ensureCat(catName)
+				if cat == nil { continue }
+				reorderList = append(reorderList, &discordgo.Channel{ID: cat.ID, Position: pos}); pos++
+				applyLeagueCatPerms(cat.ID, league.RoleName)
+				rankedCh, _ := ensureText("ranked", cat.ID)
+				if rankedCh != nil { applyRankedPerms(rankedCh.ID) }
+				ensureVoice(fmt.Sprintf("Lobby %d", lobbyNum), cat.ID, minPlayers)
+				status := "✅"
+				if created { status = "🆕"; time.Sleep(2*time.Second) } else { time.Sleep(200*time.Millisecond) }
+				_, _ = s.ChannelMessageSend(cmdCh, fmt.Sprintf("%s %s / Lobby %d", status, league.Name, lobbyNum))
 			}
 		}
-		_, _ = s.ChannelMessageSend(commandChannelID, "🏗️ Лиги созданы! Создаю блок результатов...")
 
-		// 6. SEND RESULT'S
-		resultsCat, resultsCatErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-			Name: "📍 | SEND RESULT'S", Type: discordgo.ChannelTypeGuildCategory,
-		})
-		if resultsCatErr != nil || resultsCat == nil {
-			log.Printf("[SETUP] Error creating SEND RESULT'S category: %v", resultsCatErr)
-			_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка создания категории SEND RESULT'S: %v", resultsCatErr))
-		} else {
-			allForReorder = append(allForReorder, chanPos{resultsCat.ID, globalPos})
-			globalPos++
-			_ = s.ChannelPermissionSet(resultsCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
-			for _, rid := range leagueRoleIDs {
-				_ = s.ChannelPermissionSet(resultsCat.ID, rid, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
-			}
-			if gameAdminRoleID != "" {
-				_ = s.ChannelPermissionSet(resultsCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
-			}
-			if ticketAdminRoleID != "" {
-				_ = s.ChannelPermissionSet(resultsCat.ID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
-			}
-
-			sendCh, sendErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
-				Name: "📌│отправить-результаты", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID,
-			})
-			if sendErr != nil || sendCh == nil {
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала отправить-результаты: %v", sendErr))
-			}
-
-			historyCh, historyErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📊│история-игр", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
-			if historyErr != nil || historyCh == nil {
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала история-игр: %v", historyErr))
-			}
-
-			priorityCh, priorityErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│приоритет-игр", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
-			if priorityErr != nil || priorityCh == nil {
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала приоритет-игр: %v", priorityErr))
-			}
-
-			regularCh, regularErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│обычный-рег", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
-			if regularErr != nil || regularCh == nil {
-				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала обычный-рег: %v", regularErr))
-			}
-
-			if sendCh != nil {
+		// SEND RESULT'S
+		resCat, _ := ensureCat("📍 | SEND RESULT'S")
+		if resCat != nil {
+			reorderList = append(reorderList, &discordgo.Channel{ID: resCat.ID, Position: pos}); pos++
+			_ = s.ChannelPermissionSet(resCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, denyAll)
+			if noRegRoleID != "" { _ = s.ChannelPermissionSet(resCat.ID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+			for _, rid := range leagueRoleIDs { _ = s.ChannelPermissionSet(resCat.ID, rid, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+			if gameAdminRoleID != "" { _ = s.ChannelPermissionSet(resCat.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+			if tickAdminRoleID != "" { _ = s.ChannelPermissionSet(resCat.ID, tickAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+			sendCh, created := ensureText("📌│отправить-результаты", resCat.ID)
+			if sendCh != nil && created {
 				_, _ = s.ChannelMessageSendComplex(sendCh.ID, &discordgo.MessageSend{
-					Embeds: []*discordgo.MessageEmbed{{
-						Title:       "📌 ОТПРАВКА РЕЗУЛЬТАТА",
-						Description: "Сыграли матч? Отправьте результат.\n\n**Как отправить**\n› Нажми **Отправить результат**\n› Укажи ID матча (номер из карточки)\n› Бот создаст ветку — скинь туда скриншот\n\n**Что дальше**\n› Заявка уходит модераторам матчей\n› Очки, рейтинг и статистика по картам обновляются автоматически",
-						Color:       0xe91e63,
-						Footer:      &discordgo.MessageEmbedFooter{Text: "ELITE FPL • результаты"},
+					Embeds: []*discordgo.MessageEmbed{{Title: "📌 ОТПРАВКА РЕЗУЛЬТАТА", Color: 0xe91e63,
+						Description: "Сыграли матч? Отправьте результат.\n\n› Нажми **Отправить результат**\n› Укажи ID матча\n› Бот создаст ветку — скинь туда скриншот",
+						Footer: &discordgo.MessageEmbedFooter{Text: "ELITE FPL • результаты"},
 					}},
-					Components: []discordgo.MessageComponent{
-						discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-							discordgo.Button{Label: "Отправить результат", Style: discordgo.DangerButton, CustomID: "send_result", Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
-						}},
-					},
+					Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						discordgo.Button{Label: "Отправить результат", Style: discordgo.DangerButton, CustomID: "send_result", Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
+					}}},
 				})
 			}
-			_, _ = s.ChannelMessageSend(commandChannelID, "✅ Блок SEND RESULT'S создан.")
+			ensureText("📊│история-игр", resCat.ID)
+			// приоритет-игр и обычный-рег — ТОЛЬКО для Game Admin / Ticket Admin
+			for _, chName := range []string{"📁│приоритет-игр", "📁│обычный-рег"} {
+				adminCh, _ := ensureText(chName, resCat.ID)
+				if adminCh != nil {
+					_ = s.ChannelPermissionSet(adminCh.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, denyAll)
+					if noRegRoleID != "" { _ = s.ChannelPermissionSet(adminCh.ID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+					for _, rid := range leagueRoleIDs { _ = s.ChannelPermissionSet(adminCh.ID, rid, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
+					if gameAdminRoleID != "" { _ = s.ChannelPermissionSet(adminCh.ID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+					if tickAdminRoleID != "" { _ = s.ChannelPermissionSet(adminCh.ID, tickAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+				}
+			}
 		}
 
-		// 7. Финальный reorder всех категорий одним запросом
-		time.Sleep(2 * time.Second)
-		reorderList := make([]*discordgo.Channel, 0, len(allForReorder))
-		for _, cp := range allForReorder {
-			reorderList = append(reorderList, &discordgo.Channel{ID: cp.id, Position: cp.pos})
-		}
-		if err := s.GuildChannelsReorder(guildID, reorderList); err != nil {
-			log.Println("Final reorder error:", err)
+		time.Sleep(1 * time.Second)
+		if len(reorderList) > 0 {
+			_ = s.GuildChannelsReorder(guildID, reorderList)
 		}
 
-		// 8. Роли текущим участникам
 		defaultRoleID := leagueRoleIDs["Default League"]
 		members, _ := s.GuildMembers(guildID, "", 1000)
 		for _, m := range members {
@@ -1350,16 +1190,13 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				var nick string
 				_ = queryRowDB("SELECT COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id=?", m.User.ID).Scan(&nick)
 				g, _ := s.Guild(guildID)
-				if g != nil && g.OwnerID != m.User.ID {
-					_ = s.GuildMemberNickname(guildID, m.User.ID, buildServerNick(uid, nick))
-				}
+				if g != nil && g.OwnerID != m.User.ID { _ = s.GuildMemberNickname(guildID, m.User.ID, buildServerNick(uid, nick)) }
 			} else {
 				if noRegRoleID != "" { _ = s.GuildMemberRoleAdd(guildID, m.User.ID, noRegRoleID) }
 			}
 		}
-
-		log.Printf("Setup complete for guild %s (%d categories)", guildID, globalPos)
-		_, _ = s.ChannelMessageSend(commandChannelID, "✅ Настройка завершена. Если порядок всё ещё поедет — теперь в этом канале виден прогресс и можно точно понять этап ошибки.")
+		_, _ = s.ChannelMessageSend(cmdCh, "✅ Готово! Сервер проверен и обновлён.")
+		log.Printf("[SETUP] Done for guild %s", guildID)
 	}()
 }
 
