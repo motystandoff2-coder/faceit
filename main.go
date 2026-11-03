@@ -905,7 +905,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// 5. Лиги — каждая лига/лобби = отдельная категория
 		for _, league := range LeagueConfig {
 			for _, lobbyNum := range league.Lobbies {
-				catName := fmt.Sprintf("| %s", league.Name)
+				catName := fmt.Sprintf("%s | %s", league.Emoji, league.Name)
 				log.Printf("[SETUP] Creating category: %s (Lobby %d)", catName, lobbyNum)
 				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("📁 Создаю %s / Lobby %d", league.Name, lobbyNum))
 
