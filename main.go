@@ -989,10 +989,13 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		_, _ = s.ChannelMessageSend(commandChannelID, "🏗️ Лиги созданы! Создаю блок результатов...")
 
 		// 6. SEND RESULT'S
-		resultsCat, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+		resultsCat, resultsCatErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 			Name: "📍 | SEND RESULT'S", Type: discordgo.ChannelTypeGuildCategory,
 		})
-		if resultsCat != nil {
+		if resultsCatErr != nil || resultsCat == nil {
+			log.Printf("[SETUP] Error creating SEND RESULT'S category: %v", resultsCatErr)
+			_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка создания категории SEND RESULT'S: %v", resultsCatErr))
+		} else {
 			allForReorder = append(allForReorder, chanPos{resultsCat.ID, globalPos})
 			globalPos++
 			_ = s.ChannelPermissionSet(resultsCat.ID, guildID, discordgo.PermissionOverwriteTypeRole, 0, privateDeny)
@@ -1006,12 +1009,27 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				_ = s.ChannelPermissionSet(resultsCat.ID, ticketAdminRoleID, discordgo.PermissionOverwriteTypeRole, privateAllow, 0)
 			}
 
-			sendCh, _ := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
+			sendCh, sendErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{
 				Name: "📌│отправить-результаты", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID,
 			})
-			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📊│история-игр", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
-			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│приоритет-игр", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
-			_, _ = s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│обычный-рег", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
+			if sendErr != nil || sendCh == nil {
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала отправить-результаты: %v", sendErr))
+			}
+
+			historyCh, historyErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📊│история-игр", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
+			if historyErr != nil || historyCh == nil {
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала история-игр: %v", historyErr))
+			}
+
+			priorityCh, priorityErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│приоритет-игр", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
+			if priorityErr != nil || priorityCh == nil {
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала приоритет-игр: %v", priorityErr))
+			}
+
+			regularCh, regularErr := s.GuildChannelCreateComplex(guildID, discordgo.GuildChannelCreateData{Name: "📁│обычный-рег", Type: discordgo.ChannelTypeGuildText, ParentID: resultsCat.ID})
+			if regularErr != nil || regularCh == nil {
+				_, _ = s.ChannelMessageSend(commandChannelID, fmt.Sprintf("❌ Ошибка канала обычный-рег: %v", regularErr))
+			}
 
 			if sendCh != nil {
 				_, _ = s.ChannelMessageSendComplex(sendCh.ID, &discordgo.MessageSend{
@@ -1028,6 +1046,7 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					},
 				})
 			}
+			_, _ = s.ChannelMessageSend(commandChannelID, "✅ Блок SEND RESULT'S создан.")
 		}
 
 		// 7. Финальный reorder всех категорий одним запросом
