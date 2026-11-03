@@ -123,6 +123,7 @@ func main() {
 	session.AddHandler(onInteraction)
 	session.AddHandler(onVoiceStateUpdate)
 	session.AddHandler(onGuildMemberAdd)
+	session.AddHandler(onMessageCreate)
 
 	err = session.Open()
 	if err != nil {
@@ -481,6 +482,248 @@ func onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 			break
 		}
 	}
+}
+
+// ── Screenshot AI Recognition ───────────────────────────────────────────
+
+type AIPlayerStat struct {
+	Nickname string `json:"nickname"`
+	Kills    int    `json:"kills"`
+	Deaths   int    `json:"deaths"`
+	Assists  int    `json:"assists"`
+	Team     string `json:"team"` // "CT" or "T"
+}
+
+type AIMatchResult struct {
+	ScoreCT int            `json:"score_ct"`
+	ScoreT  int            `json:"score_t"`
+	Map     string         `json:"map"`
+	Players []AIPlayerStat `json:"players"`
+}
+
+func recognizeScreenshot(imageURL string) (*AIMatchResult, error) {
+	apiKey := os.Getenv("AI_API_KEY")
+	baseURL := os.Getenv("AI_BASE_URL")
+	if apiKey == "" || baseURL == "" {
+		return nil, fmt.Errorf("AI_API_KEY or AI_BASE_URL not set")
+	}
+
+	prompt := `Analyze this Standoff 2 match result screenshot. Return ONLY valid JSON with this exact structure:
+{"score_ct": <int>, "score_t": <int>, "map": "<map name>", "players": [{"nickname": "<name>", "kills": <int>, "deaths": <int>, "assists": <int>, "team": "<CT or T>"}]}
+Rules:
+- Include all 10 players (5 per team)
+- team is "CT" or "T"
+- Read K/D/A carefully from the scoreboard columns
+- Map name in English (Sandstone, Rust, Province, Breeze, Prison, Hanami, Dune)
+- Return ONLY the JSON object, no markdown, no explanation`
+
+	payload := map[string]any{
+		"model": "gpt-4o-mini",
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": prompt},
+					{"type": "image_url", "image_url": map[string]string{"url": imageURL}},
+				},
+			},
+		},
+		"max_tokens": 1000,
+	}
+
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("AI API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var apiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("parse AI response: %v", err)
+	}
+	if len(apiResp.Choices) == 0 {
+		return nil, fmt.Errorf("no AI response choices")
+	}
+
+	content := apiResp.Choices[0].Message.Content
+	// Strip markdown code blocks if present
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var result AIMatchResult
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, fmt.Errorf("parse AI JSON: %v (raw: %s)", err, content[:min(len(content), 200)])
+	}
+	return &result, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func buildVerificationEmbed(matchID int, result *AIMatchResult, senderID string, imageURL string) *discordgo.MessageEmbed {
+	teamA := ""
+	teamB := ""
+	for _, p := range result.Players {
+		kd := fmt.Sprintf("%.2f", float64(p.Kills)/float64(max(p.Deaths, 1)))
+		line := fmt.Sprintf("**%s** — %d/%d/%d (K/D %s)\n", p.Nickname, p.Kills, p.Deaths, p.Assists, kd)
+		if p.Team == "CT" {
+			teamA += line
+		} else {
+			teamB += line
+		}
+	}
+	if teamA == "" { teamA = "—" }
+	if teamB == "" { teamB = "—" }
+
+	mapEmoji := "🗺️"
+	for _, m := range Maps {
+		if strings.EqualFold(m.Name, result.Map) {
+			mapEmoji = m.Emoji
+			break
+		}
+	}
+
+	return &discordgo.MessageEmbed{
+		Title:       fmt.Sprintf("📋 Результат матча #%d — на проверку", matchID),
+		Description: fmt.Sprintf("**Отправил:** <@%s>\n**Карта:** %s %s · формат: до 13\n\n📊 Распознано со скриншота: **%d : %d**", senderID, mapEmoji, result.Map, result.ScoreCT, result.ScoreT),
+		Color:       0xf1c40f,
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: fmt.Sprintf("🛡️ CT — %d · K/A/D", result.ScoreCT), Value: teamA, Inline: true},
+			{Name: fmt.Sprintf("💣 T — %d · K/A/D", result.ScoreT), Value: teamB, Inline: true},
+		},
+		Image:  &discordgo.MessageEmbedImage{URL: imageURL},
+		Footer: &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("Матч #%d • %s", matchID, time.Now().Format("02.01.2006 15:04"))},
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if m.Author == nil || m.Author.Bot {
+		return
+	}
+	// Только в ветках "Отчет матча #N"
+	ch, err := s.Channel(m.ChannelID)
+	if err != nil || ch == nil {
+		return
+	}
+	if ch.Type != discordgo.ChannelTypeGuildPublicThread && ch.Type != discordgo.ChannelTypeGuildPrivateThread {
+		return
+	}
+	if !strings.HasPrefix(ch.Name, "Отчет матча #") {
+		return
+	}
+
+	// Извлечь номер матча из названия ветки
+	matchNumStr := strings.TrimPrefix(ch.Name, "Отчет матча #")
+	matchID, err := strconv.Atoi(matchNumStr)
+	if err != nil {
+		return
+	}
+
+	// Проверить что есть вложение-картинка
+	var imageURL string
+	for _, att := range m.Attachments {
+		if strings.HasPrefix(att.ContentType, "image/") {
+			imageURL = att.URL
+			break
+		}
+	}
+	if imageURL == "" {
+		return
+	}
+
+	// Распознать скриншот через AI
+	_, _ = s.ChannelMessageSend(m.ChannelID, "🔍 Распознаю скриншот через AI...")
+
+	result, err := recognizeScreenshot(imageURL)
+	if err != nil {
+		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Ошибка распознавания: %v", err))
+		log.Printf("[AI] Recognition error for match #%d: %v", matchID, err)
+		return
+	}
+
+	_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Распознано! Счёт: **%d : %d** на карте **%s**. Отправляю на проверку...", result.ScoreCT, result.ScoreT, result.Map))
+
+	// Сохранить результат в БД
+	_, _ = execDB("UPDATE matches SET score_t = ?, score_ct = ?, map_name = ? WHERE id = ?", result.ScoreT, result.ScoreCT, result.Map, matchID)
+
+	// Определить канал для проверки (приоритет или обычный)
+	// Пока отправляем в обычный-рег. TODO: проверять наличие премиума у отправителя
+	guildID := ch.GuildID
+	channels, _ := s.GuildChannels(guildID)
+	var targetChID string
+	for _, c := range channels {
+		if c.Name == "📁│обычный-рег" && c.Type == discordgo.ChannelTypeGuildText {
+			targetChID = c.ID
+			break
+		}
+	}
+	if targetChID == "" {
+		// Fallback: приоритет-игр
+		for _, c := range channels {
+			if c.Name == "📁│приоритет-игр" && c.Type == discordgo.ChannelTypeGuildText {
+				targetChID = c.ID
+				break
+			}
+		}
+	}
+	if targetChID == "" {
+		_, _ = s.ChannelMessageSend(m.ChannelID, "❌ Не найден канал для проверки результатов.")
+		return
+	}
+
+	// Построить и отправить карточку проверки
+	embed := buildVerificationEmbed(matchID, result, m.Author.ID, imageURL)
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Label: "Подтвердить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("confirm_result_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "✅"}},
+			discordgo.Button{Label: "Счёт", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_score_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
+			discordgo.Button{Label: "Статистика", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_stats_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📊"}},
+		}},
+	}
+
+	_, sendErr := s.ChannelMessageSendComplex(targetChID, &discordgo.MessageSend{
+		Embeds:     []*discordgo.MessageEmbed{embed},
+		Components: components,
+	})
+	if sendErr != nil {
+		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Ошибка отправки на проверку: %v", sendErr))
+		return
+	}
+
+	_, _ = s.ChannelMessageSend(m.ChannelID, "📤 Карточка отправлена на проверку администраторам!")
 }
 
 // ── Voice State Update (lobby detection) ────────────────────────────────
@@ -1349,6 +1592,42 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
+
+	// Confirm match result
+	if strings.HasPrefix(customID, "confirm_result_") {
+		matchIDStr := strings.TrimPrefix(customID, "confirm_result_")
+		matchID, _ := strconv.Atoi(matchIDStr)
+
+		_, _ = execDB("UPDATE matches SET status = 'finished' WHERE id = ?", matchID)
+
+		// TODO: обновить статистику каждого игрока в таблице users (kills, deaths, assists, wins, losses, games)
+
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("✅ Результат матча #%d подтверждён! Статистика записана.", matchID),
+				Embeds: i.Message.Embeds,
+				Components: []discordgo.MessageComponent{},
+			},
+		})
+
+		// Отправить в историю-игр
+		channels, _ := s.GuildChannels(i.GuildID)
+		for _, c := range channels {
+			if c.Name == "📊│история-игр" && c.Type == discordgo.ChannelTypeGuildText {
+				if len(i.Message.Embeds) > 0 {
+					historyEmbed := *i.Message.Embeds[0]
+					historyEmbed.Title = fmt.Sprintf("✅ Матч #%d — завершён", matchID)
+					historyEmbed.Color = 0x2ecc71
+					_, _ = s.ChannelMessageSendComplex(c.ID, &discordgo.MessageSend{
+						Embeds: []*discordgo.MessageEmbed{&historyEmbed},
+					})
+				}
+				break
+			}
+		}
+		return
+	}
 
 	// Map ban select
 	if strings.HasPrefix(customID, "ban_") {
