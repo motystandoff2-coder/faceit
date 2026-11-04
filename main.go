@@ -930,18 +930,14 @@ func finalizeMatchStart(s *discordgo.Session, state *PickBanState, finalMap MapI
 	delete(activePickBans, state.ChannelID)
 	pickBanMu.Unlock()
 
-	_, _ = s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: state.MessageID, Channel: state.ChannelID, Embeds: &[]*discordgo.MessageEmbed{}, Components: &[]discordgo.MessageComponent{}})
+	// Удаляем старое сообщение пик-бана
+	if state.MessageID != "" {
+		_, _ = s.ChannelMessageDelete(state.ChannelID, state.MessageID)
+	}
 
 	hostMention := fmt.Sprintf("<@%s>", state.TCapID)
 	mentions := ""
 	for _, p := range append(state.TTeam, state.CTTeam...) { mentions += fmt.Sprintf("<@%s> ", p.DiscordID) }
-
-	embed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("#%d · %s %s", state.MatchID, finalMap.Emoji, finalMap.Name),
-		Description: "Игра идёт до **13 раундов**\n**Комнаты:** 🔒 Нет доступа · 🔒 Нет доступа — зайти может только свой состав\n*Ждём ссылку на лобби от хоста...*",
-		Color:       0xe91e63,
-		Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("ID матча для отправки результата: %d • %s", state.MatchID, time.Now().Format("02.01.2006 15:04"))},
-	}
 
 	components := []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
@@ -950,7 +946,31 @@ func finalizeMatchStart(s *discordgo.Session, state *PickBanState, finalMap MapI
 			discordgo.Button{Label: "Игрок не зашёл (0/6)", Style: discordgo.DangerButton, CustomID: fmt.Sprintf("noshow_%d", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "🚫"}},
 		}},
 	}
-	_, _ = s.ChannelMessageSendComplex(state.ChannelID, &discordgo.MessageSend{Content: mentions, Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
+
+	// Генерируем PNG-карточку распика
+	cardPNG, cardErr := renderPickCardPNG(s, state, finalMap)
+	if cardErr == nil && len(cardPNG) > 0 {
+		matchEmbed := &discordgo.MessageEmbed{
+			Color:  0x2d2d35,
+			Image:  &discordgo.MessageEmbedImage{URL: "attachment://pick-card.png"},
+			Footer: &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("ID матча для отправки результата: %d • %s", state.MatchID, time.Now().Format("02.01.2006 15:04"))},
+		}
+		_, _ = s.ChannelMessageSendComplex(state.ChannelID, &discordgo.MessageSend{
+			Content:    mentions,
+			Embeds:     []*discordgo.MessageEmbed{matchEmbed},
+			Components: components,
+			Files:      []*discordgo.File{{Name: "pick-card.png", ContentType: "image/png", Reader: bytes.NewReader(cardPNG)}},
+		})
+	} else {
+		// Фоллбэк: текстовый embed если карточка не сгенерировалась
+		embed := &discordgo.MessageEmbed{
+			Title:       fmt.Sprintf("#%d · %s %s", state.MatchID, finalMap.Emoji, finalMap.Name),
+			Description: "Игра идёт до **13 раундов**\n**Комнаты:** 🔒 Нет доступа · 🔒 Нет доступа — зайти может только свой состав\n*Ждём ссылку на лобби от хоста...*",
+			Color:       0xe91e63,
+			Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("ID матча для отправки результата: %d • %s", state.MatchID, time.Now().Format("02.01.2006 15:04"))},
+		}
+		_, _ = s.ChannelMessageSendComplex(state.ChannelID, &discordgo.MessageSend{Content: mentions, Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
+	}
 	_, _ = s.ChannelMessageSend(state.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби и нажми **Отправить ссылку на лобби**.", hostMention, state.MatchID))
 
 	// Создание приватных T/CT войсов и автоперенос

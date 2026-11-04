@@ -1038,3 +1038,213 @@ func updateMatchDerivedStats(matchID int) error {
 	}
 	return nil
 }
+
+// ── Pick/Ban Result Card ─────────────────────────────────────────────────
+
+type pickCardPlayer struct {
+	Name      string
+	AvatarURL string
+	Matches   int
+	KD        float64
+	Avg       float64
+	Elo       int
+}
+
+type pickCardData struct {
+	MatchID    int
+	MapName    string
+	MapEmoji   string
+	Category   string
+	HostName   string
+	HostAvatar string
+	HostGameID string
+	CTCaptain  string
+	TCaptain   string
+	CTElo      int
+	TElo       int
+	WinPctCT   int
+	WinPctT    int
+	CTPlayers  []pickCardPlayer
+	TPlayers   []pickCardPlayer
+}
+
+func buildPickCardData(s *discordgo.Session, state *PickBanState, mapInfo MapInfo) *pickCardData {
+	loadPlayer := func(p PlayerInfo) pickCardPlayer {
+		card := pickCardPlayer{Name: p.Username}
+		var matches, wins, kills, deaths int
+		_ = queryRowDB("SELECT games, wins, kills, deaths, COALESCE(NULLIF(game_nick,''), username) FROM users WHERE id = ?", p.UniqueID).Scan(&matches, &wins, &kills, &deaths, &card.Name)
+		card.Matches = matches
+		if deaths > 0 {
+			card.KD = math.Round(float64(kills)/float64(deaths)*100) / 100
+		}
+		if matches > 0 {
+			card.Avg = math.Round(float64(kills)/float64(matches)*100) / 100
+		}
+		_ = queryRowDB("SELECT elo FROM users WHERE id = ?", p.UniqueID).Scan(&card.Elo)
+		discordID := ""
+		_ = queryRowDB("SELECT discord_id FROM users WHERE id = ?", p.UniqueID).Scan(&discordID)
+		if discordID != "" {
+			card.AvatarURL = findMemberAvatarURL(s, discordID)
+		}
+		return card
+	}
+
+	data := &pickCardData{
+		MatchID:  state.MatchID,
+		MapName:  mapInfo.Name,
+		MapEmoji: mapInfo.Emoji,
+		Category: state.League,
+	}
+
+	var ctTotalElo, tTotalElo, ctCount, tCount int
+	for _, p := range state.CTTeam {
+		pc := loadPlayer(p)
+		data.CTPlayers = append(data.CTPlayers, pc)
+		ctTotalElo += pc.Elo
+		ctCount++
+		if p.IsCaptain {
+			data.CTCaptain = pc.Name
+			data.HostName = pc.Name
+			data.HostAvatar = pc.AvatarURL
+			_ = queryRowDB("SELECT COALESCE(game_id,'') FROM users WHERE id = ?", p.UniqueID).Scan(&data.HostGameID)
+		}
+	}
+	for _, p := range state.TTeam {
+		pc := loadPlayer(p)
+		data.TPlayers = append(data.TPlayers, pc)
+		tTotalElo += pc.Elo
+		tCount++
+		if p.IsCaptain {
+			data.TCaptain = pc.Name
+		}
+	}
+	if ctCount > 0 { data.CTElo = ctTotalElo / ctCount }
+	if tCount > 0 { data.TElo = tTotalElo / tCount }
+	total := data.CTElo + data.TElo
+	if total > 0 {
+		data.WinPctCT = data.CTElo * 100 / total
+		data.WinPctT = data.TElo * 100 / total
+	}
+	return data
+}
+
+func renderPickCardPNG(s *discordgo.Session, state *PickBanState, mapInfo MapInfo) ([]byte, error) {
+	data := buildPickCardData(s, state, mapInfo)
+	faces := loadCardFaces()
+
+	W, H := 1600, 900
+	img := image.NewRGBA(image.Rect(0, 0, W, H))
+
+	// Background
+	fillGradient(img, 0, 0, W, H, rgba(42, 8, 60), rgba(8, 55, 10), false)
+
+	// Left panel — CT (purple)
+	fillRoundedRect(img, 10, 10, 490, H-20, 24, rgbaA(70, 20, 90, 230))
+	drawText(img, faces.Small, 28, 44, rgba(190, 180, 200), "Counter-Terrorists")
+	fillRoundedRect(img, 28, 54, 70, 70, 14, rgba(50, 30, 65))
+
+	ctCapName := data.CTCaptain
+	if ctCapName == "" && len(data.CTPlayers) > 0 { ctCapName = data.CTPlayers[0].Name }
+	drawText(img, faces.Title, 112, 92, rgba(245, 245, 245), trimText(faces.Title, ctCapName, 320))
+	ctWinStr := fmt.Sprintf("%d%%", data.WinPctCT)
+	ctEloStr := fmt.Sprintf("%d", data.CTElo)
+	drawText(img, faces.Small, 112, 118, rgba(170, 160, 180), "Victory %")
+	drawText(img, faces.BodyBold, 220, 118, rgba(245, 245, 245), ctWinStr)
+	drawText(img, faces.Small, 300, 118, rgba(170, 160, 180), "ELO")
+	drawText(img, faces.BodyBold, 345, 118, rgba(195, 71, 255), ctEloStr)
+	drawRoundedImageFromURL(img, data.HostAvatar, 28, 54, 70, 70, 14, rgba(70, 50, 85))
+
+	for idx, p := range data.CTPlayers {
+		y := 165 + idx*120
+		if y+110 > H-20 { break }
+		fillRoundedRect(img, 20, y, 470, 108, 18, rgbaA(55, 25, 70, 220))
+		drawRoundedImageFromURL(img, p.AvatarURL, 32, y+16, 72, 72, 14, rgba(70, 50, 85))
+		drawText(img, faces.Small, 118, y+34, rgba(190, 180, 200), "Team")
+		drawText(img, faces.BodyBold, 118, y+62, rgba(245, 245, 245), trimText(faces.BodyBold, p.Name, 230))
+		drawText(img, faces.Tiny, 118, y+88, rgba(140, 130, 155), fmt.Sprintf("Matches %d", p.Matches))
+		drawText(img, faces.Tiny, 220, y+88, rgba(140, 130, 155), fmt.Sprintf("K/D %.2f", p.KD))
+		drawText(img, faces.Tiny, 328, y+88, rgba(140, 130, 155), fmt.Sprintf("AVG %.0f", p.Avg))
+	}
+
+	// Right panel — T (green)
+	fillRoundedRect(img, W-500, 10, 490, H-20, 24, rgbaA(10, 60, 15, 230))
+	drawRightText(img, faces.Small, W-28, 44, rgba(170, 200, 170), "Terrorists")
+	tCapName := data.TCaptain
+	if tCapName == "" && len(data.TPlayers) > 0 { tCapName = data.TPlayers[0].Name }
+	drawRightText(img, faces.Title, W-28, 92, rgba(245, 245, 245), trimText(faces.Title, tCapName, 320))
+	tWinStr := fmt.Sprintf("%d%%", data.WinPctT)
+	tEloStr := fmt.Sprintf("%d", data.TElo)
+	drawRightText(img, faces.Small, W-180, 118, rgba(170, 200, 170), "ELO")
+	drawRightText(img, faces.BodyBold, W-120, 118, rgba(55, 200, 100), tEloStr)
+	drawRightText(img, faces.Small, W-290, 118, rgba(170, 200, 170), "Victory %")
+	drawRightText(img, faces.BodyBold, W-230, 118, rgba(245, 245, 245), tWinStr)
+	if len(data.TPlayers) > 0 { drawRoundedImageFromURL(img, data.TPlayers[0].AvatarURL, W-98, 54, 70, 70, 14, rgba(10, 70, 20)) }
+
+	for idx, p := range data.TPlayers {
+		y := 165 + idx*120
+		if y+110 > H-20 { break }
+		fillRoundedRect(img, W-490, y, 470, 108, 18, rgbaA(15, 65, 20, 220))
+		drawRoundedImageFromURL(img, p.AvatarURL, W-490+12, y+16, 72, 72, 14, rgba(10, 70, 20))
+		drawText(img, faces.Small, W-490+98, y+34, rgba(170, 200, 170), "Team")
+		drawText(img, faces.BodyBold, W-490+98, y+62, rgba(245, 245, 245), trimText(faces.BodyBold, p.Name, 230))
+		drawText(img, faces.Tiny, W-490+98, y+88, rgba(130, 155, 135), fmt.Sprintf("Matches %d", p.Matches))
+		drawText(img, faces.Tiny, W-490+200, y+88, rgba(130, 155, 135), fmt.Sprintf("K/D %.2f", p.KD))
+		drawText(img, faces.Tiny, W-490+308, y+88, rgba(130, 155, 135), fmt.Sprintf("AVG %.0f", p.Avg))
+	}
+
+	// Center panel
+	centerX := 505
+	centerW := W - 500 - centerX
+	fillRoundedRect(img, centerX, 10, centerW, H-20, 24, rgbaA(28, 28, 32, 240))
+
+	// Map header
+	drawCenteredText(img, faces.Small, centerX+centerW/2, 48, rgba(190, 190, 195), "Map")
+	drawCenteredText(img, faces.Title, centerX+centerW/2, 86, rgba(245, 245, 245), data.MapName)
+
+	// ELITE FPL logo text center
+	drawCenteredText(img, faces.BodyBold, centerX+centerW/2, 128, rgba(190, 71, 255), "ELITE")
+	drawCenteredText(img, faces.BodyBold, centerX+centerW/2, 152, rgba(55, 200, 100), "FPL")
+
+	// League + format
+	leagueShort := strings.TrimPrefix(strings.TrimPrefix(data.Category, "🔴 | "), "🟣 | ")
+	leagueShort = strings.TrimPrefix(strings.TrimPrefix(leagueShort, "🟢 | "), "⚪ | ")
+	fillRoundedRect(img, centerX+20, 180, centerW-40, 60, 18, rgba(44, 44, 50))
+	drawCenteredText(img, faces.Body, centerX+centerW/2-80, 218, rgba(245, 245, 245), leagueShort)
+	drawText(img, faces.BodyBold, centerX+centerW/2+10, 218, rgba(195, 71, 255), "BO")
+	drawText(img, faces.BodyBold, centerX+centerW/2+45, 218, rgba(245, 245, 245), "Best of 1")
+
+	// Host block
+	fillRoundedRect(img, centerX+20, 258, centerW-40, 110, 18, rgba(44, 44, 50))
+	drawRoundedImageFromURL(img, data.HostAvatar, centerX+36, 274, 72, 72, 14, rgba(80, 70, 90))
+	drawText(img, faces.Small, centerX+120, 300, rgba(190, 190, 195), "Host")
+	drawText(img, faces.SubTitle, centerX+120, 332, rgba(245, 245, 245), trimText(faces.SubTitle, data.HostName, 180))
+	hostIDStr := data.HostGameID
+	if hostIDStr == "" { hostIDStr = "—" }
+	drawText(img, faces.Small, centerX+120+textWidth(faces.SubTitle, trimText(faces.SubTitle, data.HostName, 180))+16, 300, rgba(140, 140, 150), "ID")
+	drawText(img, faces.SubTitle, centerX+120+textWidth(faces.SubTitle, trimText(faces.SubTitle, data.HostName, 180))+36, 332, rgba(190, 190, 195), hostIDStr)
+	drawText(img, faces.Tiny, centerX+36, 358, rgba(140, 140, 150), "ℹ Хост создаёт лобби в игре")
+
+	// ELO bar
+	fillRoundedRect(img, centerX+20, 388, centerW-40, 90, 18, rgba(44, 44, 50))
+	barX := centerX + 24
+	barW := centerW - 48
+	drawText(img, faces.SubTitle, barX, 420, rgba(195, 71, 255), fmt.Sprintf("%d", data.CTElo))
+	drawRightText(img, faces.SubTitle, barX+barW, 420, rgba(55, 200, 100), fmt.Sprintf("%d", data.TElo))
+	drawCenteredText(img, faces.Small, centerX+centerW/2, 420, rgba(190, 190, 195), "ELO")
+	barY := 432
+	barH := 18
+	fillRoundedRect(img, barX, barY, barW, barH, barH/2, rgba(55, 200, 100))
+	ctBarW := barW * data.WinPctCT / 100
+	if ctBarW < 8 { ctBarW = 8 }
+	fillRoundedRect(img, barX, barY, ctBarW, barH, barH/2, rgba(195, 71, 255))
+	drawText(img, faces.Tiny, barX, barY+barH+18, rgba(140, 140, 150), "ℹ Играется строго эта карта")
+
+	// Players count
+	drawCenteredText(img, faces.Body, centerX+centerW/2, 488, rgba(190, 190, 195), fmt.Sprintf("5vs5 · Матч #%d", data.MatchID))
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
