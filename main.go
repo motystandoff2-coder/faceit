@@ -495,10 +495,12 @@ type AIPlayerStat struct {
 }
 
 type AIMatchResult struct {
-	ScoreCT int            `json:"score_ct"`
-	ScoreT  int            `json:"score_t"`
-	Map     string         `json:"map"`
-	Players []AIPlayerStat `json:"players"`
+	IsValidScoreboard bool           `json:"is_valid_scoreboard"`
+	Confidence        float64        `json:"confidence"`
+	ScoreCT           int            `json:"score_ct"`
+	ScoreT            int            `json:"score_t"`
+	Map               string         `json:"map"`
+	Players           []AIPlayerStat `json:"players"`
 }
 
 func recognizeScreenshot(imageURL string) (*AIMatchResult, error) {
@@ -508,10 +510,14 @@ func recognizeScreenshot(imageURL string) (*AIMatchResult, error) {
 		return nil, fmt.Errorf("AI_API_KEY or AI_BASE_URL not set")
 	}
 
-	prompt := `Analyze this Standoff 2 match result screenshot. Return ONLY valid JSON with this exact structure:
-{"score_ct": <int>, "score_t": <int>, "map": "<map name>", "players": [{"nickname": "<name>", "kills": <int>, "deaths": <int>, "assists": <int>, "team": "<CT or T>"}]}
+	prompt := `Analyze this image and determine if it is a REAL FINAL Standoff 2 scoreboard/table screenshot.
+Return ONLY valid JSON with this exact structure:
+{"is_valid_scoreboard": <true_or_false>, "confidence": <0.0_to_1.0>, "score_ct": <int>, "score_t": <int>, "map": "<map name>", "players": [{"nickname": "<name>", "kills": <int>, "deaths": <int>, "assists": <int>, "team": "<CT or T>"}]}
 Rules:
-- Include all 10 players (5 per team)
+- Set is_valid_scoreboard=true ONLY if this is clearly the final end-match tab/scoreboard from Standoff 2
+- If it is any random photo, lobby screenshot, cropped nonsense, menu, profile, chat, or non-final image => is_valid_scoreboard=false
+- Confidence must reflect certainty that this is a valid final scoreboard
+- Include all 10 players (5 per team) if valid
 - team is "CT" or "T"
 - Read K/D/A carefully from the scoreboard columns
 - Map name in English (Sandstone, Rust, Province, Breeze, Prison, Hanami, Dune)
@@ -575,6 +581,12 @@ Rules:
 	var result AIMatchResult
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
 		return nil, fmt.Errorf("parse AI JSON: %v (raw: %s)", err, content[:min(len(content), 200)])
+	}
+	if !result.IsValidScoreboard || result.Confidence < 0.82 {
+		return nil, fmt.Errorf("это не финальный таб или уверенность слишком низкая (valid=%v, confidence=%.2f)", result.IsValidScoreboard, result.Confidence)
+	}
+	if len(result.Players) < 8 {
+		return nil, fmt.Errorf("распознано слишком мало игроков (%d)", len(result.Players))
 	}
 	return &result, nil
 }
@@ -708,7 +720,7 @@ func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	embed := buildVerificationEmbed(matchID, result, m.Author.ID, imageURL)
 	components := []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "Подтвердить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("confirm_result_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "✅"}},
+			discordgo.Button{Label: "Подтвердить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("confirm_result_%d_%s", matchID, m.ChannelID), Emoji: &discordgo.ComponentEmoji{Name: "✅"}},
 			discordgo.Button{Label: "Счёт", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_score_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
 			discordgo.Button{Label: "Статистика", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_stats_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📊"}},
 		}},
@@ -1595,8 +1607,13 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	// Confirm match result
 	if strings.HasPrefix(customID, "confirm_result_") {
-		matchIDStr := strings.TrimPrefix(customID, "confirm_result_")
-		matchID, _ := strconv.Atoi(matchIDStr)
+		rest := strings.TrimPrefix(customID, "confirm_result_")
+		parts := strings.SplitN(rest, "_", 2)
+		matchID, _ := strconv.Atoi(parts[0])
+		sourceThreadID := ""
+		if len(parts) == 2 {
+			sourceThreadID = parts[1]
+		}
 
 		_, _ = execDB("UPDATE matches SET status = 'finished' WHERE id = ?", matchID)
 
@@ -1625,6 +1642,11 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				}
 				break
 			}
+		}
+
+		// Удалить ветку/канал, куда кидали финальный результат
+		if sourceThreadID != "" {
+			_, _ = s.ChannelDelete(sourceThreadID)
 		}
 		return
 	}
