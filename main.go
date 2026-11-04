@@ -932,7 +932,7 @@ func finalizeMatchStart(s *discordgo.Session, state *PickBanState, finalMap MapI
 
 	// Удаляем старое сообщение пик-бана
 	if state.MessageID != "" {
-		_, _ = s.ChannelMessageDelete(state.ChannelID, state.MessageID)
+		_ = s.ChannelMessageDelete(state.ChannelID, state.MessageID)
 	}
 
 	hostMention := fmt.Sprintf("<@%s>", state.TCapID)
