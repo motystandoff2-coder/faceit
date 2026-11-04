@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/bwmarrin/discordgo"
 	_ "github.com/glebarez/go-sqlite"
@@ -69,6 +71,8 @@ var LeagueConfig = []LeagueCategory{
 }
 
 var LeagueRoles = []string{"Pro League", "Division League", "Prospect League", "Default League"}
+
+const commandsChannelName = "🤖│команды"
 
 // ── Active pick/ban state ───────────────────────────────────────────────
 type PickBanState struct {
@@ -361,13 +365,31 @@ func onReady(s *discordgo.Session, r *discordgo.Ready) {
 		},
 		{
 			Name:        "profile",
-			Description: "Посмотреть профиль",
+			Description: "Карточка игрока: рейтинг, карты, последние матчи",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionUser,
 					Name:        "user",
-					Description: "Пользователь",
+					Description: "Чей профиль; без него — свой",
 					Required:    false,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "id",
+					Description: "Игровой ID из Standoff 2 или номер на проекте (#123)",
+					Required:    false,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "league",
+					Description: "Статистика какой лиги; без неё — своей",
+					Required:    false,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "Pro", Value: "Pro League"},
+						{Name: "Division", Value: "Division League"},
+						{Name: "Prospect", Value: "Prospect League"},
+						{Name: "Default", Value: "Default League"},
+					},
 				},
 			},
 		},
@@ -414,6 +436,7 @@ func isManagedChannelName(name string) bool {
 		"📊│история-игр": true,
 		"📁│приоритет-игр": true,
 		"📁│обычный-рег": true,
+		commandsChannelName: true,
 		"ranked": true,
 	}
 	if managedExact[name] {
@@ -482,260 +505,6 @@ func onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 			break
 		}
 	}
-}
-
-// ── Screenshot AI Recognition ───────────────────────────────────────────
-
-type AIPlayerStat struct {
-	Nickname string `json:"nickname"`
-	Kills    int    `json:"kills"`
-	Deaths   int    `json:"deaths"`
-	Assists  int    `json:"assists"`
-	Team     string `json:"team"` // "CT" or "T"
-}
-
-type AIMatchResult struct {
-	IsValidScoreboard bool           `json:"is_valid_scoreboard"`
-	Confidence        float64        `json:"confidence"`
-	ScoreCT           int            `json:"score_ct"`
-	ScoreT            int            `json:"score_t"`
-	Map               string         `json:"map"`
-	Players           []AIPlayerStat `json:"players"`
-}
-
-func recognizeScreenshot(imageURL string) (*AIMatchResult, error) {
-	apiKey := os.Getenv("AI_API_KEY")
-	baseURL := os.Getenv("AI_BASE_URL")
-	if apiKey == "" || baseURL == "" {
-		return nil, fmt.Errorf("AI_API_KEY or AI_BASE_URL not set")
-	}
-
-	prompt := `Analyze this image and determine if it is a REAL FINAL Standoff 2 scoreboard/table screenshot.
-Return ONLY valid JSON with this exact structure:
-{"is_valid_scoreboard": <true_or_false>, "confidence": <0.0_to_1.0>, "score_ct": <int>, "score_t": <int>, "map": "<map name>", "players": [{"nickname": "<name>", "kills": <int>, "deaths": <int>, "assists": <int>, "team": "<CT or T>"}]}
-Rules:
-- Set is_valid_scoreboard=true ONLY if this is clearly the final end-match tab/scoreboard from Standoff 2
-- If it is any random photo, lobby screenshot, cropped nonsense, menu, profile, chat, or non-final image => is_valid_scoreboard=false
-- Confidence must reflect certainty that this is a valid final scoreboard
-- Include all 10 players (5 per team) if valid
-- team is "CT" or "T"
-- Read K/D/A carefully from the scoreboard columns
-- Map name in English (Sandstone, Rust, Province, Breeze, Prison, Hanami, Dune)
-- Return ONLY the JSON object, no markdown, no explanation`
-
-	payload := map[string]any{
-		"model": "gpt-4o-mini",
-		"messages": []map[string]any{
-			{
-				"role": "user",
-				"content": []map[string]any{
-					{"type": "text", "text": prompt},
-					{"type": "image_url", "image_url": map[string]string{"url": imageURL}},
-				},
-			},
-		},
-		"max_tokens": 1000,
-	}
-
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("AI API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("parse AI response: %v", err)
-	}
-	if len(apiResp.Choices) == 0 {
-		return nil, fmt.Errorf("no AI response choices")
-	}
-
-	content := apiResp.Choices[0].Message.Content
-	// Strip markdown code blocks if present
-	content = strings.TrimSpace(content)
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
-
-	var result AIMatchResult
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil, fmt.Errorf("parse AI JSON: %v (raw: %s)", err, content[:min(len(content), 200)])
-	}
-	if !result.IsValidScoreboard || result.Confidence < 0.82 {
-		return nil, fmt.Errorf("это не финальный таб или уверенность слишком низкая (valid=%v, confidence=%.2f)", result.IsValidScoreboard, result.Confidence)
-	}
-	if len(result.Players) < 8 {
-		return nil, fmt.Errorf("распознано слишком мало игроков (%d)", len(result.Players))
-	}
-	return &result, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func buildVerificationEmbed(matchID int, result *AIMatchResult, senderID string, imageURL string) *discordgo.MessageEmbed {
-	teamA := ""
-	teamB := ""
-	for _, p := range result.Players {
-		kd := fmt.Sprintf("%.2f", float64(p.Kills)/float64(max(p.Deaths, 1)))
-		line := fmt.Sprintf("**%s** — %d/%d/%d (K/D %s)\n", p.Nickname, p.Kills, p.Deaths, p.Assists, kd)
-		if p.Team == "CT" {
-			teamA += line
-		} else {
-			teamB += line
-		}
-	}
-	if teamA == "" { teamA = "—" }
-	if teamB == "" { teamB = "—" }
-
-	mapEmoji := "🗺️"
-	for _, m := range Maps {
-		if strings.EqualFold(m.Name, result.Map) {
-			mapEmoji = m.Emoji
-			break
-		}
-	}
-
-	return &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("📋 Результат матча #%d — на проверку", matchID),
-		Description: fmt.Sprintf("**Отправил:** <@%s>\n**Карта:** %s %s · формат: до 13\n\n📊 Распознано со скриншота: **%d : %d**", senderID, mapEmoji, result.Map, result.ScoreCT, result.ScoreT),
-		Color:       0xf1c40f,
-		Fields: []*discordgo.MessageEmbedField{
-			{Name: fmt.Sprintf("🛡️ CT — %d · K/A/D", result.ScoreCT), Value: teamA, Inline: true},
-			{Name: fmt.Sprintf("💣 T — %d · K/A/D", result.ScoreT), Value: teamB, Inline: true},
-		},
-		Image:  &discordgo.MessageEmbedImage{URL: imageURL},
-		Footer: &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("Матч #%d • %s", matchID, time.Now().Format("02.01.2006 15:04"))},
-	}
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author == nil || m.Author.Bot {
-		return
-	}
-	// Только в ветках "Отчет матча #N"
-	ch, err := s.Channel(m.ChannelID)
-	if err != nil || ch == nil {
-		return
-	}
-	if ch.Type != discordgo.ChannelTypeGuildPublicThread && ch.Type != discordgo.ChannelTypeGuildPrivateThread {
-		return
-	}
-	if !strings.HasPrefix(ch.Name, "Отчет матча #") {
-		return
-	}
-
-	// Извлечь номер матча из названия ветки
-	matchNumStr := strings.TrimPrefix(ch.Name, "Отчет матча #")
-	matchID, err := strconv.Atoi(matchNumStr)
-	if err != nil {
-		return
-	}
-
-	// Проверить что есть вложение-картинка
-	var imageURL string
-	for _, att := range m.Attachments {
-		if strings.HasPrefix(att.ContentType, "image/") {
-			imageURL = att.URL
-			break
-		}
-	}
-	if imageURL == "" {
-		return
-	}
-
-	// Распознать скриншот через AI
-	_, _ = s.ChannelMessageSend(m.ChannelID, "🔍 Распознаю скриншот через AI...")
-
-	result, err := recognizeScreenshot(imageURL)
-	if err != nil {
-		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Ошибка распознавания: %v", err))
-		log.Printf("[AI] Recognition error for match #%d: %v", matchID, err)
-		return
-	}
-
-	_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Распознано! Счёт: **%d : %d** на карте **%s**. Отправляю на проверку...", result.ScoreCT, result.ScoreT, result.Map))
-
-	// Сохранить результат в БД
-	_, _ = execDB("UPDATE matches SET score_t = ?, score_ct = ?, map_name = ? WHERE id = ?", result.ScoreT, result.ScoreCT, result.Map, matchID)
-
-	// Определить канал для проверки (приоритет или обычный)
-	// Пока отправляем в обычный-рег. TODO: проверять наличие премиума у отправителя
-	guildID := ch.GuildID
-	channels, _ := s.GuildChannels(guildID)
-	var targetChID string
-	for _, c := range channels {
-		if c.Name == "📁│обычный-рег" && c.Type == discordgo.ChannelTypeGuildText {
-			targetChID = c.ID
-			break
-		}
-	}
-	if targetChID == "" {
-		// Fallback: приоритет-игр
-		for _, c := range channels {
-			if c.Name == "📁│приоритет-игр" && c.Type == discordgo.ChannelTypeGuildText {
-				targetChID = c.ID
-				break
-			}
-		}
-	}
-	if targetChID == "" {
-		_, _ = s.ChannelMessageSend(m.ChannelID, "❌ Не найден канал для проверки результатов.")
-		return
-	}
-
-	// Построить и отправить карточку проверки
-	embed := buildVerificationEmbed(matchID, result, m.Author.ID, imageURL)
-	components := []discordgo.MessageComponent{
-		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "Подтвердить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("confirm_result_%d_%s", matchID, m.ChannelID), Emoji: &discordgo.ComponentEmoji{Name: "✅"}},
-			discordgo.Button{Label: "Счёт", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_score_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
-			discordgo.Button{Label: "Статистика", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_stats_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📊"}},
-		}},
-	}
-
-	_, sendErr := s.ChannelMessageSendComplex(targetChID, &discordgo.MessageSend{
-		Embeds:     []*discordgo.MessageEmbed{embed},
-		Components: components,
-	})
-	if sendErr != nil {
-		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Ошибка отправки на проверку: %v", sendErr))
-		return
-	}
-
-	_, _ = s.ChannelMessageSend(m.ChannelID, "📤 Карточка отправлена на проверку администраторам!")
 }
 
 // ── Voice State Update (lobby detection) ────────────────────────────────
@@ -1239,8 +1008,37 @@ func onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 }
 
+func findCommandsChannelID(s *discordgo.Session, guildID string) string {
+	channels, err := s.GuildChannels(guildID)
+	if err != nil {
+		return ""
+	}
+	for _, ch := range channels {
+		if ch.Type == discordgo.ChannelTypeGuildText && ch.Name == commandsChannelName {
+			return ch.ID
+		}
+	}
+	return ""
+}
+
+func commandAllowedInChannel(s *discordgo.Session, i *discordgo.InteractionCreate, commandName string) bool {
+	cmdChannelID := findCommandsChannelID(s, i.GuildID)
+	if cmdChannelID == "" {
+		return commandName == "setup"
+	}
+	if i.ChannelID == cmdChannelID {
+		return true
+	}
+	respondEphemeral(s, i, fmt.Sprintf("❌ Команды можно использовать только в канале <#%s>.", cmdChannelID))
+	return false
+}
+
 func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	switch i.ApplicationCommandData().Name {
+	commandName := i.ApplicationCommandData().Name
+	if !commandAllowedInChannel(s, i, commandName) {
+		return
+	}
+	switch commandName {
 	case "setup":
 		handleSetup(s, i)
 	case "delete":
@@ -1306,26 +1104,36 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		leagueRoleIDs   := map[string]string{}
 		for _, lr := range LeagueRoles { leagueRoleIDs[lr] = ensureRole(lr) }
 
-		denyAll    := int64(discordgo.PermissionViewChannel)
-		viewOnly   := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory)
-		fullAccess := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages |
+		denyAll            := int64(discordgo.PermissionViewChannel)
+		viewOnly           := int64(discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory)
+		denyLeagueAccess   := int64(discordgo.PermissionSendMessages | discordgo.PermissionVoiceConnect |
+			discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
+		fullAccess         := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages |
 			discordgo.PermissionReadMessageHistory | discordgo.PermissionVoiceConnect |
 			discordgo.PermissionVoiceSpeak | discordgo.PermissionVoiceUseVAD)
-		pubWrite   := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
+		pubWrite           := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionReadMessageHistory)
 
 		applyLeagueCatPerms := func(catID, ownerRole string) {
 			_ = s.ChannelPermissionSet(catID, guildID, discordgo.PermissionOverwriteTypeRole, 0, denyAll)
 			if noRegRoleID != "" { _ = s.ChannelPermissionSet(catID, noRegRoleID, discordgo.PermissionOverwriteTypeRole, 0, denyAll) }
-			for _, rid := range leagueRoleIDs { _ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, viewOnly, 0) }
-			if rid := leagueRoleIDs[ownerRole]; rid != "" { _ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
+			for roleName, rid := range leagueRoleIDs {
+				if rid == "" {
+					continue
+				}
+				allow := viewOnly
+				deny := denyLeagueAccess
+				if roleName == ownerRole {
+					allow = fullAccess
+					deny = 0
+				}
+				_ = s.ChannelPermissionSet(catID, rid, discordgo.PermissionOverwriteTypeRole, allow, deny)
+			}
 			if gameAdminRoleID != "" { _ = s.ChannelPermissionSet(catID, gameAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
 			if tickAdminRoleID != "" { _ = s.ChannelPermissionSet(catID, tickAdminRoleID, discordgo.PermissionOverwriteTypeRole, fullAccess, 0) }
 		}
 
 		applyRankedPerms := func(id string) {
-			_ = s.ChannelPermissionSet(id, guildID, discordgo.PermissionOverwriteTypeRole,
-				int64(discordgo.PermissionViewChannel|discordgo.PermissionReadMessageHistory),
-				int64(discordgo.PermissionSendMessages))
+			_ = s.ChannelPermissionDelete(id, guildID)
 			if session.State != nil && session.State.User != nil {
 				_ = s.ChannelPermissionSet(id, session.State.User.ID, discordgo.PermissionOverwriteTypeMember,
 					int64(discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionReadMessageHistory|discordgo.PermissionEmbedLinks), 0)
@@ -1415,6 +1223,17 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				})
 			}
 			ensureText("📊│история-игр", resCat.ID)
+			cmdChannel, cmdCreated := ensureText(commandsChannelName, resCat.ID)
+			if cmdChannel != nil && cmdCreated {
+				_, _ = s.ChannelMessageSendComplex(cmdChannel.ID, &discordgo.MessageSend{
+					Embeds: []*discordgo.MessageEmbed{{
+						Title:       "🤖 КАНАЛ КОМАНД",
+						Color:       0x6c5ce7,
+						Description: "Используйте slash-команды только здесь.\n\n› /profile — карточка игрока\n› /nickname — смена игрового ника\n› /setup и /delete — управление структурой сервера",
+						Footer:      &discordgo.MessageEmbedFooter{Text: "ELITE FPL • commands"},
+					}},
+				})
+			}
 			// приоритет-игр и обычный-рег — ТОЛЬКО для Game Admin / Ticket Admin
 			for _, chName := range []string{"📁│приоритет-игр", "📁│обычный-рег"} {
 				adminCh, _ := ensureText(chName, resCat.ID)
@@ -1442,12 +1261,18 @@ func handleSetup(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			_ = queryRowDB("SELECT is_registered FROM users WHERE discord_id = ?", m.User.ID).Scan(&isReg)
 			if isReg == 1 {
 				if defaultRoleID != "" { _ = s.GuildMemberRoleAdd(guildID, m.User.ID, defaultRoleID) }
+				if noRegRoleID != "" { _ = s.GuildMemberRoleRemove(guildID, m.User.ID, noRegRoleID) }
 				var nick string
 				_ = queryRowDB("SELECT COALESCE(NULLIF(game_nick,''),username) FROM users WHERE discord_id=?", m.User.ID).Scan(&nick)
 				g, _ := s.Guild(guildID)
 				if g != nil && g.OwnerID != m.User.ID { _ = s.GuildMemberNickname(guildID, m.User.ID, buildServerNick(uid, nick)) }
 			} else {
 				if noRegRoleID != "" { _ = s.GuildMemberRoleAdd(guildID, m.User.ID, noRegRoleID) }
+				for _, rid := range leagueRoleIDs {
+					if rid != "" {
+						_ = s.GuildMemberRoleRemove(guildID, m.User.ID, rid)
+					}
+				}
 			}
 		}
 		_, _ = s.ChannelMessageSend(cmdCh, "✅ Готово! Сервер проверен и обновлён.")
@@ -1520,82 +1345,63 @@ func handleNickname(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	targetUser := i.Member.User
+	lookupID := ""
+	preferredLeague := ""
 	options := i.ApplicationCommandData().Options
 	for _, opt := range options {
-		if opt.Name == "user" {
+		switch opt.Name {
+		case "user":
 			targetUser = opt.UserValue(s)
+		case "id":
+			lookupID = strings.TrimSpace(opt.StringValue())
+		case "league":
+			preferredLeague = opt.StringValue()
 		}
 	}
 
-	var id int
-	var username string
-	var elo, games, wins, losses, kills, deaths, assists, mvps int
-	var joinedAt string
+	if lookupID != "" {
+		lookupValue := strings.TrimPrefix(lookupID, "#")
+		targetDiscordID := ""
+		if internalID, err := strconv.Atoi(lookupValue); err == nil {
+			_ = queryRowDB("SELECT discord_id FROM users WHERE id = ?", internalID).Scan(&targetDiscordID)
+		}
+		if targetDiscordID == "" {
+			_ = queryRowDB("SELECT discord_id FROM users WHERE game_id = ?", lookupValue).Scan(&targetDiscordID)
+		}
+		if targetDiscordID == "" {
+			respondEphemeral(s, i, "❌ Игрок по указанному ID не найден.")
+			return
+		}
+		if user, err := s.User(targetDiscordID); err == nil && user != nil {
+			targetUser = user
+		} else {
+			var fallbackName string
+			_ = queryRowDB("SELECT COALESCE(NULLIF(game_nick,''), username) FROM users WHERE discord_id = ?", targetDiscordID).Scan(&fallbackName)
+			targetUser = &discordgo.User{ID: targetDiscordID, Username: fallbackName}
+		}
+	}
 
-	err := queryRowDB(`SELECT id, username, elo, games, wins, losses, kills, deaths, assists, mvps, joined_at 
-		FROM users WHERE discord_id = ?`, targetUser.ID).Scan(&id, &username, &elo, &games, &wins, &losses, &kills, &deaths, &assists, &mvps, &joinedAt)
-
+	cardPNG, err := renderProfileCardPNG(s, i.GuildID, targetUser, preferredLeague)
 	if err != nil {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ Пользователь не найден. Используйте /register",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		respondEphemeral(s, i, fmt.Sprintf("❌ Не удалось собрать карточку профиля: %v", err))
 		return
 	}
 
-	kd := 0.0
-	if deaths > 0 {
-		kd = float64(kills) / float64(deaths)
-	}
-	avgKills := 0.0
-	if games > 0 {
-		avgKills = float64(kills) / float64(games)
-	}
-
-	// Map stats
-	mapStatsText := ""
-	rows, err := queryDB("SELECT map_name, wins, losses, kills, deaths FROM map_stats WHERE user_id = ?", id)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var mn string
-			var mw, ml, mk, md int
-			rows.Scan(&mn, &mw, &ml, &mk, &md)
-			mkd := 0.0
-			if md > 0 {
-				mkd = float64(mk) / float64(md)
-			}
-			wr := 0
-			if mw+ml > 0 {
-				wr = mw * 100 / (mw + ml)
-			}
-			mapStatsText += fmt.Sprintf("**%s** W=%d L=%d K/D=%.2f W/R=%d%%\n", mn, mw, ml, mkd, wr)
-		}
-	}
-	if mapStatsText == "" {
-		mapStatsText = "Нет данных"
-	}
-
 	embed := &discordgo.MessageEmbed{
-		Title: fmt.Sprintf("%s  #%d", username, id),
-		Description: fmt.Sprintf("ID: %s", targetUser.ID),
-		Color:       0x1db954,
-		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: targetUser.AvatarURL("256")},
-		Fields: []*discordgo.MessageEmbedField{
-			{Name: "📊 Statistic", Value: fmt.Sprintf("**ELO:** %d\n**K/D:** %.2f\n**AVG:** %.1f", elo, kd, avgKills), Inline: true},
-			{Name: "📅 Info", Value: fmt.Sprintf("**Games:** %d\n**MVP:** %d\n**Join Date:** %s", games, mvps, joinedAt[:10]), Inline: true},
-			{Name: "⚔️ Stats", Value: fmt.Sprintf("**Убийства:** %d\n**Смерти:** %d\n**Ассисты:** %d\n**Победы:** %d\n**Поражения:** %d", kills, deaths, assists, wins, losses)},
-			{Name: "🗺️ Map Statistic", Value: mapStatsText},
-		},
+		Title: fmt.Sprintf("Профиль — %s", targetUser.Username),
+		Color: 0x6c5ce7,
+		Image: &discordgo.MessageEmbedImage{URL: "attachment://profile-card.png"},
 	}
 
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{embed},
+			Files: []*discordgo.File{{
+				Name:        "profile-card.png",
+				ContentType: "image/png",
+				Reader:      bytes.NewReader(cardPNG),
+			}},
 		},
 	})
 }
@@ -1604,52 +1410,6 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
-
-	// Confirm match result
-	if strings.HasPrefix(customID, "confirm_result_") {
-		rest := strings.TrimPrefix(customID, "confirm_result_")
-		parts := strings.SplitN(rest, "_", 2)
-		matchID, _ := strconv.Atoi(parts[0])
-		sourceThreadID := ""
-		if len(parts) == 2 {
-			sourceThreadID = parts[1]
-		}
-
-		_, _ = execDB("UPDATE matches SET status = 'finished' WHERE id = ?", matchID)
-
-		// TODO: обновить статистику каждого игрока в таблице users (kills, deaths, assists, wins, losses, games)
-
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseUpdateMessage,
-			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("✅ Результат матча #%d подтверждён! Статистика записана.", matchID),
-				Embeds: i.Message.Embeds,
-				Components: []discordgo.MessageComponent{},
-			},
-		})
-
-		// Отправить в историю-игр
-		channels, _ := s.GuildChannels(i.GuildID)
-		for _, c := range channels {
-			if c.Name == "📊│история-игр" && c.Type == discordgo.ChannelTypeGuildText {
-				if len(i.Message.Embeds) > 0 {
-					historyEmbed := *i.Message.Embeds[0]
-					historyEmbed.Title = fmt.Sprintf("✅ Матч #%d — завершён", matchID)
-					historyEmbed.Color = 0x2ecc71
-					_, _ = s.ChannelMessageSendComplex(c.ID, &discordgo.MessageSend{
-						Embeds: []*discordgo.MessageEmbed{&historyEmbed},
-					})
-				}
-				break
-			}
-		}
-
-		// Удалить ветку/канал, куда кидали финальный результат
-		if sourceThreadID != "" {
-			_, _ = s.ChannelDelete(sourceThreadID)
-		}
-		return
-	}
 
 	// Map ban select
 	if strings.HasPrefix(customID, "ban_") {
@@ -1806,6 +1566,105 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				},
 			},
 		})
+		return
+	}
+
+	// Confirm match result
+	if strings.HasPrefix(customID, "confirm_result_") {
+		matchIDStr := strings.TrimPrefix(customID, "confirm_result_")
+		matchID, _ := strconv.Atoi(matchIDStr)
+
+		// Update match status to finished
+		_, _ = execDB("UPDATE matches SET status = 'finished' WHERE id = ?", matchID)
+
+		// Update player stats in users table
+		pRows, pErr := queryDB("SELECT user_id, kills, deaths, assists, team FROM match_players WHERE match_id = ?", matchID)
+		if pErr == nil {
+			defer pRows.Close()
+			var scoreCT, scoreT int
+			_ = queryRowDB("SELECT score_ct, score_t FROM matches WHERE id = ?", matchID).Scan(&scoreCT, &scoreT)
+			for pRows.Next() {
+				var uid, k, d, a int
+				var team string
+				pRows.Scan(&uid, &k, &d, &a, &team)
+				won := 0
+				if (team == "CT" && scoreCT > scoreT) || (team == "T" && scoreT > scoreCT) { won = 1 }
+				lost := 0
+				if won == 0 { lost = 1 }
+				_, _ = execDB("UPDATE users SET games = games + 1, wins = wins + ?, losses = losses + ?, kills = kills + ?, deaths = deaths + ?, assists = assists + ? WHERE id = ?",
+					won, lost, k, d, a, uid)
+			}
+		}
+		_ = updateMatchDerivedStats(matchID)
+
+		respondEphemeral(s, i, fmt.Sprintf("✅ Матч #%d подтверждён! Статистика записана.", matchID))
+
+		// Send generated match card to история-игр
+		historyContent := fmt.Sprintf("✅ #%d", matchID)
+		mentions := []string{}
+		mentionRows, mentionErr := queryDB("SELECT u.discord_id FROM match_players mp JOIN users u ON mp.user_id = u.id WHERE mp.match_id = ? ORDER BY mp.id", matchID)
+		if mentionErr == nil {
+			defer mentionRows.Close()
+			for mentionRows.Next() {
+				var discordID string
+				if err := mentionRows.Scan(&discordID); err == nil && discordID != "" {
+					mentions = append(mentions, fmt.Sprintf("<@%s>", discordID))
+				}
+			}
+		}
+		if len(mentions) > 0 {
+			historyContent += "\n" + strings.Join(mentions, ", ")
+		}
+		matchCardPNG, cardErr := renderMatchCardPNG(s, matchID)
+
+		channels, _ := s.GuildChannels(i.GuildID)
+		for _, c := range channels {
+			if c.Name != "📊│история-игр" {
+				continue
+			}
+			if cardErr == nil && len(matchCardPNG) > 0 {
+				_, _ = s.ChannelMessageSendComplex(c.ID, &discordgo.MessageSend{
+					Content: historyContent,
+					Embeds: []*discordgo.MessageEmbed{{
+						Title: fmt.Sprintf("🏆 Матч #%d завершён", matchID),
+						Color: 0x2ecc71,
+						Image: &discordgo.MessageEmbedImage{URL: "attachment://match-card.png"},
+						Footer: &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("ELITE FPL • результат матча • %s", time.Now().Format("02.01.2006 15:04"))},
+					}},
+					Files: []*discordgo.File{{
+						Name:        "match-card.png",
+						ContentType: "image/png",
+						Reader:      bytes.NewReader(matchCardPNG),
+					}},
+				})
+			} else {
+				_, _ = s.ChannelMessageSend(c.ID, historyContent)
+			}
+			break
+		}
+
+		// Автоудаление тредов «Отчет матча #N» после подтверждения
+		go func() {
+			time.Sleep(3 * time.Second)
+			allChannels, err := s.GuildChannels(i.GuildID)
+			if err != nil { return }
+			threadName := fmt.Sprintf("Отчет матча #%d", matchID)
+			for _, ch := range allChannels {
+				if ch.Name == threadName && (ch.Type == discordgo.ChannelTypeGuildPublicThread || ch.Type == discordgo.ChannelTypeGuildPrivateThread) {
+					_, _ = s.ChannelDelete(ch.ID)
+				}
+			}
+			// Also check active threads
+			activeThreads, err := s.GuildThreadsActive(i.GuildID)
+			if err == nil {
+				for _, t := range activeThreads.Threads {
+					if t.Name == threadName {
+						_, _ = s.ChannelDelete(t.ID)
+					}
+				}
+			}
+		}()
+
 		return
 	}
 
@@ -1968,11 +1827,24 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			return
 		}
 
-		thread, err := s.MessageThreadStartComplex(i.ChannelID, i.Message.ID, &discordgo.ThreadStart{
+		// Создаём приватный тред (видят только приглашённые)
+		thread, err := s.ThreadStartComplex(i.ChannelID, &discordgo.ThreadStart{
 			Name:                fmt.Sprintf("Отчет матча #%d", matchID),
 			AutoArchiveDuration: 60,
+			Type:                discordgo.ChannelTypeGuildPrivateThread,
+			Invitable:           false,
 		})
 		if err != nil {
+			// Фоллбэк: приватный тред от сообщения
+			thread, err = s.MessageThreadStartComplex(i.ChannelID, i.Message.ID, &discordgo.ThreadStart{
+				Name:                fmt.Sprintf("Отчет матча #%d", matchID),
+				AutoArchiveDuration: 60,
+				Type:                discordgo.ChannelTypeGuildPrivateThread,
+				Invitable:           false,
+			})
+		}
+		if err != nil {
+			// Последний фоллбэк: публичный тред (если нет Boost Level 2)
 			thread, err = s.ThreadStartComplex(i.ChannelID, &discordgo.ThreadStart{
 				Name:                fmt.Sprintf("Отчет матча #%d", matchID),
 				AutoArchiveDuration: 60,
@@ -2003,3 +1875,823 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		})
 	}
 }
+
+// ── AI Screenshot Recognition ───────────────────────────────────────────
+
+func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if m.Author == nil || m.Author.Bot { return }
+	if len(m.Attachments) == 0 { return }
+
+	// Check if this is a match report thread
+	ch, err := s.Channel(m.ChannelID)
+	if err != nil || (ch.Type != discordgo.ChannelTypeGuildPublicThread && ch.Type != discordgo.ChannelTypeGuildPrivateThread) { return }
+	if !strings.HasPrefix(ch.Name, "Отчет матча #") { return }
+
+	// Extract match ID from thread name
+	matchIDStr := strings.TrimPrefix(ch.Name, "Отчет матча #")
+	matchID, err := strconv.Atoi(matchIDStr)
+	if err != nil { return }
+
+	// Get first image attachment
+	imageURL := ""
+	for _, att := range m.Attachments {
+		if strings.HasSuffix(strings.ToLower(att.Filename), ".png") ||
+			strings.HasSuffix(strings.ToLower(att.Filename), ".jpg") ||
+			strings.HasSuffix(strings.ToLower(att.Filename), ".jpeg") ||
+			strings.HasSuffix(strings.ToLower(att.Filename), ".webp") {
+			imageURL = att.URL
+			break
+		}
+	}
+	if imageURL == "" { return }
+
+	_, _ = s.ChannelMessageSend(m.ChannelID, "🔍 Обрабатываю скриншот...")
+
+	// Get match info from DB
+	var mapName, category string
+	_ = queryRowDB("SELECT COALESCE(map_name,''), COALESCE(category,'') FROM matches WHERE id = ?", matchID).Scan(&mapName, &category)
+
+	// Get match players
+	rows, err := queryDB("SELECT mp.user_id, mp.team, COALESCE(NULLIF(u.game_nick, ''), u.username), u.discord_id FROM match_players mp JOIN users u ON mp.user_id = u.id WHERE mp.match_id = ? ORDER BY mp.id", matchID)
+	if err != nil { _, _ = s.ChannelMessageSend(m.ChannelID, "❌ Ошибка получения игроков матча."); return }
+	defer rows.Close()
+
+	var players []MatchPlayerInfo
+	for rows.Next() {
+		var p MatchPlayerInfo
+		rows.Scan(&p.UserID, &p.Team, &p.Username, &p.DiscordID)
+		players = append(players, p)
+	}
+
+	// Call AI to recognize screenshot
+	result, err := recognizeScreenshot(imageURL, players)
+	if err != nil {
+		if strings.Contains(err.Error(), "NOT_SCOREBOARD") {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "❌ Это не финальный скриншот матча Standoff 2. Отправьте именно финальную таблицу результатов (экран после завершения матча с надписью «СТАТИСТИКА» / «ПОБЕДА» / «ПОРАЖЕНИЕ»).")
+			return
+		}
+		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Ошибка распознавания: %v", err))
+		return
+	}
+	result = normalizeRecognition(players, result)
+
+	// Save recognized stats to DB
+	for _, p := range result.Players {
+		rating := calculatePlayerRating(p.Kills, p.Deaths, p.Assists)
+		_, _ = execDB("UPDATE match_players SET kills = ?, deaths = ?, assists = ?, rating = ? WHERE match_id = ? AND user_id = ?",
+			p.Kills, p.Deaths, p.Assists, rating, matchID, p.UserID)
+	}
+	scoreParts := strings.Split(result.Score, ":")
+	if len(scoreParts) == 2 {
+		sct, _ := strconv.Atoi(strings.TrimSpace(result.ScoreCT))
+		st, _ := strconv.Atoi(strings.TrimSpace(result.ScoreT))
+		_, _ = execDB("UPDATE matches SET score_ct = ?, score_t = ?, status = 'review' WHERE id = ?", sct, st, matchID)
+	}
+
+	_, _ = s.ChannelMessageSend(m.ChannelID, "✅ Скриншот распознан! Отправляю на проверку...")
+
+	// Find admin channel
+	channels, _ := s.GuildChannels(m.GuildID)
+	adminChID := ""
+	for _, c := range channels {
+		if c.Name == "📁│обычный-рег" { adminChID = c.ID; break }
+	}
+	if adminChID == "" { _, _ = s.ChannelMessageSend(m.ChannelID, "❌ Канал обычный-рег не найден."); return }
+
+	mentions := []string{}
+	for _, p := range result.Players {
+		if p.DiscordID != "" {
+			mentions = append(mentions, fmt.Sprintf("<@%s>", p.DiscordID))
+		}
+	}
+	content := fmt.Sprintf("✅ #%d", matchID)
+	if len(mentions) > 0 {
+		content += "\n" + strings.Join(mentions, ", ")
+	}
+
+	// === На проверку уходит ИСХОДНЫЙ скриншот + embed с распознанными данными ===
+	teamAText := ""
+	teamBText := ""
+	for _, p := range result.Players {
+		line := fmt.Sprintf("• <@%s> — %d/%d/%d\n", p.DiscordID, p.Kills, p.Assists, p.Deaths)
+		if p.Team == "CT" { teamAText += line } else { teamBText += line }
+	}
+	if teamAText == "" { teamAText = "Нет данных\n" }
+	if teamBText == "" { teamBText = "Нет данных\n" }
+
+	reviewEmbed := &discordgo.MessageEmbed{
+		Title: fmt.Sprintf("🏆 Матч #%d — на проверку", matchID),
+		Description: fmt.Sprintf(
+			"**Отправил:** <@%s>\n**Карта:** %s %s\n**Счёт:** %s\n\n"+
+			"🅰️ **CT — %s · K/A/D**\n%s\n"+
+			"🅱️ **T — %s · K/A/D**\n%s",
+			m.Author.ID, getMapEmojiByName(mapName), mapName, result.Score,
+			result.ScoreCT, teamAText, result.ScoreT, teamBText,
+		),
+		Color: 0xe91e63,
+		Image: &discordgo.MessageEmbedImage{URL: imageURL},
+		Footer: &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("Матч #%d • %s", matchID, time.Now().Format("02.01.2006 15:04"))},
+	}
+
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Label: "Подтвердить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("confirm_result_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "✅"}},
+			discordgo.Button{Label: "Счёт", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_score_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
+			discordgo.Button{Label: "Статистика", Style: discordgo.SecondaryButton, CustomID: fmt.Sprintf("edit_stats_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📊"}},
+		}},
+	}
+
+	_, _ = s.ChannelMessageSendComplex(adminChID, &discordgo.MessageSend{
+		Content:    content,
+		Embeds:     []*discordgo.MessageEmbed{reviewEmbed},
+		Components: components,
+	})
+}
+
+func getMapEmojiByName(name string) string {
+	for _, m := range Maps { if m.Name == name { return m.Emoji } }
+	return "🗺️"
+}
+
+type RecognizedPlayer struct {
+	DiscordID string
+	Username  string
+	UserID    int
+	Team      string
+	Kills     int
+	Deaths    int
+	Assists   int
+}
+
+type RecognitionResult struct {
+	Score   string
+	ScoreCT string
+	ScoreT  string
+	Players []RecognizedPlayer
+}
+
+type MatchPlayerInfo struct {
+	UserID    int
+	Team      string
+	Username  string
+	DiscordID string
+}
+
+func stripLeadingClanTags(value string) string {
+	text := strings.TrimSpace(value)
+	text = strings.TrimLeft(text, "!?.@#$%^&*()_+-=[]{}\\|/`~,:;\"' ")
+
+	if idx := strings.IndexAny(text, "])}"); strings.HasPrefix(text, "[") || strings.HasPrefix(text, "(") || strings.HasPrefix(text, "{") {
+		if idx > 0 && idx < 24 {
+			text = strings.TrimSpace(text[idx+1:])
+		}
+	}
+
+	for _, sep := range []string{"|", "｜", "¦", "—", "–", "-", "·", "•", ":"} {
+		idx := strings.Index(text, sep)
+		if idx > 0 && idx < 24 {
+			left := strings.TrimSpace(text[:idx])
+			right := strings.TrimSpace(text[idx+len(sep):])
+			if left != "" && right != "" {
+				text = right
+				break
+			}
+		}
+	}
+
+	upper := strings.ToUpper(text)
+	if strings.HasPrefix(upper, "OLD ") || upper == "OLD" {
+		text = strings.TrimSpace(text[3:])
+	}
+
+	return strings.TrimSpace(text)
+}
+
+func normalizeNickname(value string) string {
+	replacer := strings.NewReplacer(
+		"а", "a", "б", "b", "в", "v", "г", "g", "д", "d", "е", "e", "ё", "e",
+		"ж", "zh", "з", "z", "и", "i", "й", "y", "к", "k", "л", "l", "м", "m",
+		"н", "n", "о", "o", "п", "p", "р", "r", "с", "s", "т", "t", "у", "u",
+		"ф", "f", "х", "h", "ц", "c", "ч", "ch", "ш", "sh", "щ", "sch", "ъ", "",
+		"ы", "y", "ь", "", "э", "e", "ю", "yu", "я", "ya",
+	)
+
+	text := strings.ToLower(stripLeadingClanTags(value))
+	text = replacer.Replace(text)
+
+	var builder strings.Builder
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
+}
+
+func nicknameSimilarity(first, second string) float64 {
+	left := normalizeNickname(first)
+	right := normalizeNickname(second)
+	if left == "" || right == "" {
+		return 0
+	}
+	if left == right {
+		return 1
+	}
+	if strings.Contains(left, right) || strings.Contains(right, left) {
+		return 0.95
+	}
+	if len(left) < 2 || len(right) < 2 {
+		return 0
+	}
+
+	leftBigrams := map[string]int{}
+	rightBigrams := map[string]int{}
+	leftCount := 0
+	rightCount := 0
+
+	for i := 0; i < len(left)-1; i++ {
+		leftBigrams[left[i:i+2]]++
+		leftCount++
+	}
+	for i := 0; i < len(right)-1; i++ {
+		rightBigrams[right[i:i+2]]++
+		rightCount++
+	}
+	if leftCount == 0 || rightCount == 0 {
+		return 0
+	}
+
+	intersections := 0
+	for gram, leftValue := range leftBigrams {
+		rightValue := rightBigrams[gram]
+		if rightValue == 0 {
+			continue
+		}
+		if leftValue < rightValue {
+			intersections += leftValue
+		} else {
+			intersections += rightValue
+		}
+	}
+
+	return (2 * float64(intersections)) / float64(leftCount+rightCount)
+}
+
+func normalizeRecognition(matchPlayers []MatchPlayerInfo, result *RecognitionResult) *RecognitionResult {
+	if result == nil {
+		return nil
+	}
+
+	used := map[int]bool{}
+	normalizedPlayers := make([]RecognizedPlayer, 0, len(matchPlayers))
+
+	findBestMatch := func(player MatchPlayerInfo) *RecognizedPlayer {
+		bestIndex := -1
+		bestScore := 0.0
+
+		for idx, recognized := range result.Players {
+			if used[idx] {
+				continue
+			}
+
+			score := 0.0
+			if recognized.UserID != 0 && recognized.UserID == player.UserID {
+				score = 100
+			} else if recognized.DiscordID != "" && recognized.DiscordID == player.DiscordID {
+				score = 90
+			} else {
+				score = nicknameSimilarity(player.Username, recognized.Username)
+				if strings.EqualFold(recognized.Team, player.Team) {
+					score += 0.05
+				}
+				if score < 0.72 {
+					continue
+				}
+			}
+
+			if score > bestScore {
+				bestScore = score
+				bestIndex = idx
+			}
+		}
+
+		if bestIndex < 0 {
+			return nil
+		}
+
+		used[bestIndex] = true
+		clone := result.Players[bestIndex]
+		return &clone
+	}
+
+	for _, player := range matchPlayers {
+		kills := 0
+		assists := 0
+		deaths := 13
+
+		if matched := findBestMatch(player); matched != nil {
+			kills = matched.Kills
+			assists = matched.Assists
+			deaths = matched.Deaths
+			if kills == 0 && assists == 0 && deaths == 0 {
+				deaths = 13
+			}
+		}
+
+		normalizedPlayers = append(normalizedPlayers, RecognizedPlayer{
+			DiscordID: player.DiscordID,
+			Username:  player.Username,
+			UserID:    player.UserID,
+			Team:      player.Team,
+			Kills:     kills,
+			Deaths:    deaths,
+			Assists:   assists,
+		})
+	}
+
+	return &RecognitionResult{
+		Score:   result.Score,
+		ScoreCT: result.ScoreCT,
+		ScoreT:  result.ScoreT,
+		Players: normalizedPlayers,
+	}
+}
+
+func extractHistoryCardURL(message *discordgo.Message) string {
+	if message == nil {
+		return ""
+	}
+	for _, att := range message.Attachments {
+		if att != nil && att.URL != "" {
+			return att.URL
+		}
+	}
+	for _, embed := range message.Embeds {
+		if embed != nil && embed.Image != nil && embed.Image.URL != "" {
+			return embed.Image.URL
+		}
+	}
+	return ""
+}
+
+func downloadURLBytes(fileURL string) ([]byte, string, error) {
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("http %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, resp.Header.Get("Content-Type"), nil
+}
+
+func imageExtension(fileURL, contentType string) string {
+	lowerURL := strings.ToLower(fileURL)
+	lowerType := strings.ToLower(contentType)
+	switch {
+	case strings.Contains(lowerType, "png") || strings.HasSuffix(lowerURL, ".png"):
+		return ".png"
+	case strings.Contains(lowerType, "webp") || strings.HasSuffix(lowerURL, ".webp"):
+		return ".webp"
+	default:
+		return ".jpg"
+	}
+}
+
+func cleanEnvSecret(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "\"'")
+	return strings.TrimSpace(value)
+}
+
+func buildAIImagePayloadURL(imageURL string) string {
+	resp, err := http.Get(imageURL)
+	if err != nil {
+		return imageURL
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return imageURL
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || len(body) == 0 {
+		return imageURL
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		lowerURL := strings.ToLower(imageURL)
+		switch {
+		case strings.HasSuffix(lowerURL, ".png"):
+			contentType = "image/png"
+		case strings.HasSuffix(lowerURL, ".webp"):
+			contentType = "image/webp"
+		default:
+			contentType = "image/jpeg"
+		}
+	}
+
+	return fmt.Sprintf("data:%s;base64,%s", contentType, base64.StdEncoding.EncodeToString(body))
+}
+
+// fetchAvailableModels запрашивает список доступных моделей у AI-провайдера
+func fetchAvailableModels(baseURL, apiKey string) []string {
+	req, err := http.NewRequest("GET", baseURL+"/models", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil
+	}
+
+	var models []string
+	for _, m := range result.Data {
+		models = append(models, m.ID)
+	}
+	return models
+}
+
+// selectBestVisionModel выбирает лучшую vision-модель из списка доступных
+func selectBestVisionModel(available []string, preferred string) string {
+	if len(available) == 0 {
+		return preferred
+	}
+
+	for _, m := range available {
+		if strings.EqualFold(m, preferred) {
+			return m
+		}
+	}
+
+	visionPriority := []string{
+		"gemini-3.8-flash",
+		"gemini-3.7-flash",
+		"gemini-3.6-flash",
+		"gemini-3.1-pro",
+		"gemini-2.5-flash",
+		"gemini-2.0-flash",
+		"gemini-1.5-flash",
+		"gemini-1.5-pro",
+		"gpt-4o-mini",
+		"gpt-4o",
+		"gpt-4-turbo",
+		"gpt-4-vision-preview",
+		"gpt-4.1-mini",
+		"gpt-4.1",
+		"gpt-4.1-nano",
+		"gpt-4-turbo-2024-04-09",
+		"gpt-4o-2024-05-13",
+		"gpt-4o-2024-08-06",
+		"gpt-4o-mini-2024-07-18",
+		"chatgpt-4o-latest",
+	}
+
+	for _, prio := range visionPriority {
+		for _, m := range available {
+			if strings.EqualFold(m, prio) {
+				return m
+			}
+		}
+	}
+
+	for _, m := range available {
+		lower := strings.ToLower(m)
+		if strings.Contains(lower, "gemini") || strings.Contains(lower, "vision") || strings.Contains(lower, "4o") || strings.Contains(lower, "4.1") || strings.Contains(lower, "flash") || strings.Contains(lower, "pro") {
+			return m
+		}
+	}
+
+	for _, m := range available {
+		lower := strings.ToLower(m)
+		if strings.Contains(lower, "gpt-4") || strings.Contains(lower, "gemini") {
+			return m
+		}
+	}
+
+	return available[0]
+}
+
+func buildModelCandidates(preferred string, available []string, baseURL string) []string {
+	seen := map[string]bool{}
+	candidates := []string{}
+	add := func(model string) {
+		model = cleanEnvSecret(model)
+		if model == "" || seen[strings.ToLower(model)] {
+			return
+		}
+		seen[strings.ToLower(model)] = true
+		candidates = append(candidates, model)
+	}
+
+	if len(available) > 0 {
+		add(selectBestVisionModel(available, preferred))
+		for _, model := range available {
+			lower := strings.ToLower(model)
+			if strings.Contains(lower, "gemini") || strings.Contains(lower, "vision") || strings.Contains(lower, "4o") || strings.Contains(lower, "flash") || strings.Contains(lower, "pro") {
+				add(model)
+			}
+		}
+	}
+
+	lowerBase := strings.ToLower(baseURL)
+	if strings.Contains(lowerBase, "starimg") || strings.Contains(strings.ToLower(preferred), "gemini") {
+		add("gemini-3.8-flash")
+		add("gemini-3.7-flash")
+		add("gemini-3.6-flash")
+		add("gemini-3.1-pro")
+		add("gemini-2.5-flash")
+		add("gemini-1.5-flash")
+	}
+
+	add(preferred)
+	add("gpt-4o-mini")
+	add("gpt-4o")
+	add("gpt-4-turbo")
+	add("gpt-4-vision-preview")
+	add("gpt-4.1-mini")
+	add("gpt-4.1")
+
+	return candidates
+}
+
+func recognizeScreenshot(imageURL string, matchPlayers []MatchPlayerInfo) (*RecognitionResult, error) {
+	apiKey := cleanEnvSecret(os.Getenv("AI_API_KEY"))
+	baseURL := strings.TrimRight(cleanEnvSecret(os.Getenv("AI_BASE_URL")), "/")
+	model := cleanEnvSecret(os.Getenv("AI_MODEL"))
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+	if apiKey == "" || baseURL == "" {
+		return nil, fmt.Errorf("AI_API_KEY or AI_BASE_URL not set")
+	}
+
+	// Автоопределение доступной модели через /models
+	availableModels := fetchAvailableModels(baseURL, apiKey)
+	if len(availableModels) > 0 {
+		model = selectBestVisionModel(availableModels, model)
+		log.Printf("AI: выбрана модель %s (доступно %d моделей)", model, len(availableModels))
+	} else {
+		log.Printf("AI: список моделей не получен, используем fallback-кандидаты для %s", baseURL)
+	}
+
+	payloadImageURL := buildAIImagePayloadURL(imageURL)
+
+	playerList := ""
+	for _, p := range matchPlayers {
+		playerList += fmt.Sprintf("- %s (team: %s, userID: %d, discordID: %s)\n", p.Username, p.Team, p.UserID, p.DiscordID)
+	}
+
+	prompt := fmt.Sprintf(`You are analyzing a Standoff 2 screenshot.
+
+FIRST: determine if this image is a FINAL end-game scoreboard (the screen shown AFTER the match ends, with "ПОБЕДА"/"ПОРАЖЕНИЕ"/"СТАТИСТИКА" header, showing both teams' final K/D/A stats).
+
+If the image is NOT a final scoreboard (e.g. it's a random photo, meme, mid-game TAB, lobby screenshot, or anything else), return EXACTLY:
+{"error": "not_a_scoreboard"}
+
+If it IS a valid final scoreboard, return the match data as JSON.
+
+Known players in this match:
+%s
+
+Return this exact JSON structure:
+{
+  "score_ct": "number",
+  "score_t": "number",
+  "players": [
+    {
+      "username": "matched player username from known list",
+      "discord_id": "their discord_id",
+      "user_id": number,
+      "team": "CT or T",
+      "kills": number,
+      "deaths": number,
+      "assists": number
+    }
+  ]
+}
+
+Rules:
+- Use ONLY players from the known list.
+- Never assign one visible scoreboard row to two different players.
+- Fuzzy-match nicknames: ignore clan tags, OLD prefixes, brackets, punctuation and harmless extra text.
+- If a player is visible with a different but clearly matching nickname, still return the known player's exact user_id and discord_id.
+- If a player's row is truly absent from the final scoreboard, do not invent stats.
+- If a visible row is 0/0/0, return that row exactly as 0/0/0.
+- Read ONLY K/D/A from the image itself.
+- Do not guess unreadable numbers.`, playerList)
+
+	reqBody := map[string]any{
+		"model": model,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": prompt},
+					{"type": "image_url", "image_url": map[string]string{"url": payloadImageURL}},
+				},
+			},
+		},
+		"max_tokens": 2000,
+	}
+
+	// response_format поддерживается не всеми провайдерами, добавляем только для известных
+	lowerBase := strings.ToLower(baseURL)
+	if strings.Contains(lowerBase, "openai.com") || strings.Contains(lowerBase, "openrouter") {
+		reqBody["response_format"] = map[string]string{"type": "json_object"}
+	}
+
+	endpoint := baseURL + "/chat/completions"
+
+	type authAttempt struct {
+		Name    string
+		Headers map[string]string
+	}
+
+	parseSuccess := func(respBody []byte) (*RecognitionResult, error) {
+		var aiResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(respBody, &aiResp); err != nil {
+			return nil, fmt.Errorf("parse AI response: %v", err)
+		}
+		if len(aiResp.Choices) == 0 {
+			return nil, fmt.Errorf("no AI response choices")
+		}
+
+		content := strings.TrimSpace(aiResp.Choices[0].Message.Content)
+		if idx := strings.Index(content, "{"); idx >= 0 { content = content[idx:] }
+		if idx := strings.LastIndex(content, "}"); idx >= 0 { content = content[:idx+1] }
+
+		// Check if AI rejected the image as not a scoreboard
+		if strings.Contains(content, "not_a_scoreboard") {
+			return nil, fmt.Errorf("NOT_SCOREBOARD")
+		}
+
+		var parsed struct {
+			ScoreCT json.Number `json:"score_ct"`
+			ScoreT  json.Number `json:"score_t"`
+			Players []struct {
+				Username  string `json:"username"`
+				DiscordID string `json:"discord_id"`
+				UserID    int    `json:"user_id"`
+				Team      string `json:"team"`
+				Kills     int    `json:"kills"`
+				Deaths    int    `json:"deaths"`
+				Assists   int    `json:"assists"`
+			} `json:"players"`
+		}
+		if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+			return nil, fmt.Errorf("parse AI JSON: %v (raw: %s)", err, content[:min(len(content), 300)])
+		}
+
+		result := &RecognitionResult{
+			ScoreCT: parsed.ScoreCT.String(),
+			ScoreT:  parsed.ScoreT.String(),
+			Score:   parsed.ScoreCT.String() + ":" + parsed.ScoreT.String(),
+		}
+		for _, p := range parsed.Players {
+			result.Players = append(result.Players, RecognizedPlayer{
+				DiscordID: p.DiscordID,
+				Username:  p.Username,
+				UserID:    p.UserID,
+				Team:      p.Team,
+				Kills:     p.Kills,
+				Deaths:    p.Deaths,
+				Assists:   p.Assists,
+			})
+		}
+		return result, nil
+	}
+
+	authMode := strings.ToLower(cleanEnvSecret(os.Getenv("AI_AUTH_MODE")))
+	authAttempts := []authAttempt{{
+		Name:    "bearer",
+		Headers: map[string]string{"Authorization": "Bearer " + apiKey},
+	}}
+	if authMode == "" || authMode == "smart" || authMode == "auto" {
+		authAttempts = append(authAttempts,
+			authAttempt{Name: "raw-authorization", Headers: map[string]string{"Authorization": apiKey}},
+			authAttempt{Name: "x-api-key", Headers: map[string]string{"x-api-key": apiKey}},
+			authAttempt{Name: "api-key", Headers: map[string]string{"api-key": apiKey}},
+		)
+	} else if authMode == "raw" {
+		authAttempts = []authAttempt{{Name: "raw-authorization", Headers: map[string]string{"Authorization": apiKey}}}
+	} else if authMode == "x-api-key" {
+		authAttempts = []authAttempt{{Name: "x-api-key", Headers: map[string]string{"x-api-key": apiKey}}}
+	} else if authMode == "api-key" {
+		authAttempts = []authAttempt{{Name: "api-key", Headers: map[string]string{"api-key": apiKey}}}
+	}
+
+	modelsToTry := buildModelCandidates(model, availableModels, baseURL)
+
+	var finalErr error
+	for _, currentModel := range modelsToTry {
+		log.Printf("AI: пробуем модель %s", currentModel)
+		reqBody["model"] = currentModel
+		bodyBytes, _ := json.Marshal(reqBody)
+
+		var lastErr error
+		var bestStatus int
+		var bestBody []byte
+		var bestAttempt string
+
+		for idx, attempt := range authAttempts {
+			req, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyBytes))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			for header, value := range attempt.Headers {
+				req.Header.Set(header, value)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			respBody, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+
+			if resp.StatusCode == 200 {
+				return parseSuccess(respBody)
+			}
+
+			if idx == 0 || bestBody == nil {
+				bestStatus = resp.StatusCode
+				bestBody = respBody
+				bestAttempt = attempt.Name
+			}
+			lastErr = fmt.Errorf("attempt %s failed", attempt.Name)
+
+			lowerBody := strings.ToLower(string(respBody))
+			if strings.Contains(lowerBody, "invalid_api_key") || strings.Contains(lowerBody, "invalid api key") {
+				continue
+			}
+			if strings.Contains(lowerBody, "missing authorization header") || strings.Contains(lowerBody, "use authorization: bearer") {
+				break
+			}
+			if resp.StatusCode != 401 && resp.StatusCode != 403 {
+				break
+			}
+		}
+
+		if len(bestBody) > 0 {
+			lowerBody := strings.ToLower(string(bestBody))
+			if strings.Contains(lowerBody, "model_not_found") || strings.Contains(lowerBody, "unknown model") || strings.Contains(lowerBody, "does not exist") {
+				finalErr = fmt.Errorf("AI API error %d (%s): %s", bestStatus, bestAttempt, string(bestBody[:min(len(bestBody), 400)]))
+				continue
+			}
+			return nil, fmt.Errorf("AI API error %d (%s): %s", bestStatus, bestAttempt, string(bestBody[:min(len(bestBody), 400)]))
+		}
+		if lastErr != nil {
+			finalErr = lastErr
+			continue
+		}
+	}
+
+	if finalErr != nil {
+		return nil, finalErr
+	}
+	return nil, fmt.Errorf("AI API request failed")
+}
+
+func min(a, b int) int { if a < b { return a }; return b }
