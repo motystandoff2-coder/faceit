@@ -1820,10 +1820,23 @@ func handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
-					Content: "❌ Матч не найден.",
+					Content: "❌ Матч не найден в базе данных.",
 					Flags:   discordgo.MessageFlagsEphemeral,
 				},
 			})
+			return
+		}
+
+		if status == "finished" {
+			respondEphemeral(s, i, "❌ Этот матч уже зарегистрирован и подтверждён.")
+			return
+		}
+		if status == "review" {
+			respondEphemeral(s, i, "❌ Результат этого матча уже на проверке у администрации.")
+			return
+		}
+		if status == "reporting" {
+			respondEphemeral(s, i, "❌ Для этого матча уже создана ветка отправки результата. Проверьте список активных веток.")
 			return
 		}
 
