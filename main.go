@@ -901,26 +901,47 @@ func scheduleAutoBan(s *discordgo.Session, state *PickBanState) {
 }
 
 func scheduleTeamVoicesCleanup(s *discordgo.Session, guildID string, state *PickBanState) {
-	matchID := state.MatchID
+	tVoice := state.TVoiceID
+	ctVoice := state.CTVoiceID
+	if tVoice == "" && ctVoice == "" {
+		return
+	}
 	go func() {
-		time.Sleep(3 * time.Minute)
-		g, err := s.State.Guild(guildID)
-		if err != nil {
-			g, err = s.Guild(guildID)
-			if err != nil || g == nil {
-				return
+		// Проверяем каждые 30 секунд, максимум 10 минут
+		for attempt := 0; attempt < 20; attempt++ {
+			time.Sleep(30 * time.Second)
+			countT, countCT := 0, 0
+			// Получаем VoiceStates из State cache
+			g, err := s.State.Guild(guildID)
+			if err == nil && g != nil {
+				for _, vs := range g.VoiceStates {
+					if tVoice != "" && vs.ChannelID == tVoice { countT++ }
+					if ctVoice != "" && vs.ChannelID == ctVoice { countCT++ }
+				}
+			}
+			// Если оба пусты — удаляем
+			if countT == 0 && countCT == 0 {
+				// Ждём ещё 30 секунд для уверенности
+				time.Sleep(30 * time.Second)
+				// Перепроверяем
+				g2, err2 := s.State.Guild(guildID)
+				c2T, c2CT := 0, 0
+				if err2 == nil && g2 != nil {
+					for _, vs := range g2.VoiceStates {
+						if tVoice != "" && vs.ChannelID == tVoice { c2T++ }
+						if ctVoice != "" && vs.ChannelID == ctVoice { c2CT++ }
+					}
+				}
+				if c2T == 0 && c2CT == 0 {
+					if tVoice != "" { _, _ = s.ChannelDelete(tVoice) }
+					if ctVoice != "" { _, _ = s.ChannelDelete(ctVoice) }
+					return
+				}
 			}
 		}
-		countT, countCT := 0, 0
-		for _, vs := range g.VoiceStates {
-			if state.TVoiceID != "" && vs.ChannelID == state.TVoiceID { countT++ }
-			if state.CTVoiceID != "" && vs.ChannelID == state.CTVoiceID { countCT++ }
-		}
-		if countT == 0 && countCT == 0 {
-			if state.TVoiceID != "" { _, _ = s.ChannelDelete(state.TVoiceID) }
-			if state.CTVoiceID != "" { _, _ = s.ChannelDelete(state.CTVoiceID) }
-		}
-		_ = matchID
+		// Через 10 минут удаляем принудительно
+		if tVoice != "" { _, _ = s.ChannelDelete(tVoice) }
+		if ctVoice != "" { _, _ = s.ChannelDelete(ctVoice) }
 	}()
 }
 

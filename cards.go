@@ -779,8 +779,8 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 	drawText(img, faces.Body, tpl.MVPStat3.X+36, tpl.BottomLeftTitleY, rgba(226, 226, 226), "A")
 	fillRoundedRect(img, tpl.BottomRightCard.X, tpl.BottomRightCard.Y, tpl.BottomRightCard.W, tpl.BottomRightCard.H, tpl.BottomRightCard.R, tpl.PanelColor)
 	drawRoundedImageFromURL(img, data.MVP.AvatarURL, tpl.MVPAvatar.X, tpl.MVPAvatar.Y, tpl.MVPAvatar.W, tpl.MVPAvatar.H, tpl.MVPAvatar.R, rgba(52, 48, 55))
-	drawText(img, faces.Italic, tpl.MVPAvatar.X+172, tpl.MVPAvatar.Y+52, rgba(198, 198, 198), "Game MVP")
-	drawText(img, faces.Display, tpl.MVPAvatar.X+172, tpl.MVPAvatar.Y+102, tpl.TextPrimary, trimText(faces.Display, data.MVP.Name, 320))
+	drawText(img, faces.Body, tpl.MVPAvatar.X+172, tpl.MVPAvatar.Y+46, rgba(198, 198, 198), "Game MVP")
+	drawText(img, faces.Title, tpl.MVPAvatar.X+172, tpl.MVPAvatar.Y+92, tpl.TextPrimary, trimText(faces.Title, data.MVP.Name, 240))
 	fillRoundedRect(img, tpl.MVPStat1.X, tpl.MVPStat1.Y, tpl.MVPStat1.W, tpl.MVPStat1.H, tpl.MVPStat1.R, rgba(28, 24, 34))
 	fillRoundedRect(img, tpl.MVPStat2.X, tpl.MVPStat2.Y, tpl.MVPStat2.W, tpl.MVPStat2.H, tpl.MVPStat2.R, rgba(28, 24, 34))
 	fillRoundedRect(img, tpl.MVPStat3.X, tpl.MVPStat3.Y, tpl.MVPStat3.W, tpl.MVPStat3.H, tpl.MVPStat3.R, rgba(28, 24, 34))
@@ -909,7 +909,7 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 	halfW := ip.W / 2
 	infoItems := []struct{ L, V string }{
 		{"Playtime", fmt.Sprintf("%dh", data.PlayHours)},
-		{"Join Date", data.JoinedAt.Format("02.01.2006")},
+		{"Join Date", data.JoinedAt.Format("02.01.06")},
 		{"Games", fmt.Sprintf("%d", data.Games)},
 		{"MVP", fmt.Sprintf("%d", data.MVPs)},
 	}
@@ -1208,7 +1208,7 @@ func renderPickCardPNG(s *discordgo.Session, state *PickBanState, mapInfo MapInf
 	drawRightText(img, faces.BodyBold, tpl.RightPanel.X+tpl.RightPanel.W-110, tpl.RightPanel.Y+108, tpl.TAccent, tEloStr)
 	drawRightText(img, faces.Small, tpl.RightPanel.X+tpl.RightPanel.W-280, tpl.RightPanel.Y+108, tpl.SoftT, "Victory %")
 	drawRightText(img, faces.BodyBold, tpl.RightPanel.X+tpl.RightPanel.W-220, tpl.RightPanel.Y+108, tpl.TextPrimary, tWinStr)
-	if len(data.TPlayers) > 0 { drawRoundedImageFromURL(img, data.TPlayers[0].AvatarURL, tpl.RightPanel.X+tpl.RightPanel.W-88, tpl.RightPanel.Y+44, 70, 70, 14, rgba(10, 70, 20)) }
+	if len(data.TPlayers) > 0 { drawRoundedImageFromURL(img, data.TPlayers[0].AvatarURL, tpl.RightPanel.X+tpl.RightPanel.W-92, tpl.RightPanel.Y+44, 64, 64, 14, rgba(10, 70, 20)) }
 
 	for idx, p := range data.TPlayers {
 		y := tpl.SideCardTop + idx*tpl.SideCardGap
@@ -1239,9 +1239,11 @@ func renderPickCardPNG(s *discordgo.Session, state *PickBanState, mapInfo MapInf
 	leagueShort := strings.TrimPrefix(strings.TrimPrefix(data.Category, "🔴 | "), "🟣 | ")
 	leagueShort = strings.TrimPrefix(strings.TrimPrefix(leagueShort, "🟢 | "), "⚪ | ")
 	fillRoundedRect(img, tpl.MetaStrip.X, tpl.MetaStrip.Y, tpl.MetaStrip.W, tpl.MetaStrip.H, tpl.MetaStrip.R, tpl.InnerPanelColor)
-	drawCenteredText(img, faces.Body, centerX+centerW/2-80, tpl.MetaStrip.Y+38, tpl.TextPrimary, leagueShort)
-	drawText(img, faces.BodyBold, centerX+centerW/2+10, tpl.MetaStrip.Y+38, tpl.CTAccent, "BO")
-	drawText(img, faces.BodyBold, centerX+centerW/2+45, tpl.MetaStrip.Y+38, tpl.TextPrimary, "Best of 1")
+	// League name (left), BO badge (center-right), format (right)  
+	leagueTrimmed := trimText(faces.Body, leagueShort, centerW/2-40)
+	drawText(img, faces.Body, tpl.MetaStrip.X+18, tpl.MetaStrip.Y+38, tpl.TextPrimary, leagueTrimmed)
+	drawRightText(img, faces.BodyBold, tpl.MetaStrip.X+tpl.MetaStrip.W-18, tpl.MetaStrip.Y+38, tpl.TextPrimary, "Best of 1")
+	drawText(img, faces.BodyBold, tpl.MetaStrip.X+tpl.MetaStrip.W-180, tpl.MetaStrip.Y+38, tpl.CTAccent, "BO")
 
 	// Host block
 	fillRoundedRect(img, tpl.HostCard.X, tpl.HostCard.Y, tpl.HostCard.W, tpl.HostCard.H, tpl.HostCard.R, tpl.InnerPanelColor)
