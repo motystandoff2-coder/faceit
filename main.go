@@ -1364,6 +1364,11 @@ func handleNickname(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // ── /profile ────────────────────────────────────────────────────────────
 
 func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Сразу отвечаем Discord что бот думает (до 15 минут на ответ)
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+
 	targetUser := i.Member.User
 	lookupID := ""
 	preferredLeague := ""
@@ -1379,6 +1384,12 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	editError := func(msg string) {
+		_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &msg,
+		})
+	}
+
 	if lookupID != "" {
 		lookupValue := strings.TrimPrefix(lookupID, "#")
 		targetDiscordID := ""
@@ -1389,7 +1400,7 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			_ = queryRowDB("SELECT discord_id FROM users WHERE game_id = ?", lookupValue).Scan(&targetDiscordID)
 		}
 		if targetDiscordID == "" {
-			respondEphemeral(s, i, "❌ Игрок по указанному ID не найден.")
+			editError("❌ Игрок по указанному ID не найден.")
 			return
 		}
 		if user, err := s.User(targetDiscordID); err == nil && user != nil {
@@ -1403,27 +1414,27 @@ func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	cardPNG, err := renderProfileCardPNG(s, i.GuildID, targetUser, preferredLeague)
 	if err != nil {
-		respondEphemeral(s, i, fmt.Sprintf("❌ Не удалось собрать карточку профиля: %v", err))
+		editError(fmt.Sprintf("❌ Не удалось собрать карточку профиля: %v", err))
 		return
 	}
 
-	embed := &discordgo.MessageEmbed{
-		Title: fmt.Sprintf("Профиль — %s", targetUser.Username),
-		Color: 0x6c5ce7,
-		Image: &discordgo.MessageEmbedImage{URL: "attachment://profile-card.png"},
-	}
-
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
-			Files: []*discordgo.File{{
-				Name:        "profile-card.png",
-				ContentType: "image/png",
-				Reader:      bytes.NewReader(cardPNG),
-			}},
-		},
+	// Отправляем карточку через followup (файлы нельзя отправить через InteractionResponseEdit)
+	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Embeds: []*discordgo.MessageEmbed{{
+			Title: fmt.Sprintf("Профиль — %s", targetUser.Username),
+			Color: 0x6c5ce7,
+			Image: &discordgo.MessageEmbedImage{URL: "attachment://profile-card.png"},
+		}},
+		Files: []*discordgo.File{{
+			Name:        "profile-card.png",
+			ContentType: "image/png",
+			Reader:      bytes.NewReader(cardPNG),
+		}},
 	})
+
+	// Удаляем начальное "бот думает" сообщение
+	emptyContent := "⠀"
+	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &emptyContent})
 }
 
 // ── Component (buttons, selects) ────────────────────────────────────────
