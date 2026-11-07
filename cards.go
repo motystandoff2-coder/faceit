@@ -806,182 +806,209 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	fillGradient(img, 0, 0, w, h, tpl.BackgroundLeft, tpl.BackgroundRight, false)
 
+	// ── Баннер ────────────────────────────────────────────────────────────
 	fillRoundedRect(img, tpl.Banner.X, tpl.Banner.Y, tpl.Banner.W, tpl.Banner.H, tpl.Banner.R, tpl.PanelColor)
 	drawRoundedImageFromURL(img, data.AvatarURL, tpl.BannerAvatar.X, tpl.BannerAvatar.Y, tpl.BannerAvatar.W, tpl.BannerAvatar.H, tpl.BannerAvatar.R, rgba(70, 70, 75))
-	drawText(img, faces.Display, tpl.BannerNameX, tpl.BannerNameY, tpl.TextPrimary, trimText(faces.Display, data.DisplayName, 420))
-	drawText(img, faces.SubTitle, tpl.BannerNameX, tpl.BannerMetaY, tpl.TextMuted, fmt.Sprintf("#%d", data.ProjectID))
-	drawText(img, faces.SubTitle, tpl.BannerGameIDX, tpl.BannerMetaY, tpl.TextMuted, fmt.Sprintf("ID: %s", data.GameID))
+	// Имя: максимальная ширина до иконок (1240 - отступ)
+	nameMaxW := 1240 - tpl.BannerNameX - 20
+	drawText(img, faces.Display, tpl.BannerNameX, tpl.BannerNameY, tpl.TextPrimary, trimText(faces.Display, data.DisplayName, nameMaxW))
+	drawText(img, faces.BodyBold, tpl.BannerNameX, tpl.BannerMetaY, tpl.TextMuted, fmt.Sprintf("#%d", data.ProjectID))
+	drawText(img, faces.BodyBold, tpl.BannerGameIDX, tpl.BannerMetaY, tpl.TextMuted, fmt.Sprintf("ID: %s", trimText(faces.BodyBold, data.GameID, 320)))
 	for i := 0; i < 4; i++ {
 		fillRoundedRect(img, 1240+i*64, tpl.TopIconY, tpl.TopIconSize, tpl.TopIconSize, 12, rgba(54, 52, 57))
 	}
 
-	leftPanelX, leftPanelY := tpl.StatPanel.X, tpl.StatPanel.Y
-	leftPanelW, leftPanelH := tpl.StatPanel.W, tpl.StatPanel.H
-	fillRoundedRect(img, leftPanelX, leftPanelY, leftPanelW, leftPanelH, tpl.StatPanel.R, tpl.PanelColor)
-	drawText(img, faces.Title, leftPanelX+110, leftPanelY+66, rgba(241, 241, 241), "Statistic")
-	fillRoundedRect(img, tpl.MainStatCard.X, tpl.MainStatCard.Y, tpl.MainStatCard.W, tpl.MainStatCard.H, tpl.MainStatCard.R, tpl.PanelDark)
-	drawProgressRing(img, tpl.MainStatCard.X+68, tpl.MainStatCard.Y+92, 46, 8, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(93, 92, 96), tpl.AccentPurple)
-	drawText(img, faces.Display, tpl.MainStatCard.X+125, tpl.MainStatCard.Y+92, tpl.TextPrimary, fmt.Sprintf("%d", data.Elo))
-	drawRightText(img, faces.SubTitle, tpl.MainStatCard.X+tpl.MainStatCard.W-20, tpl.MainStatCard.Y+92, tpl.TextPrimary, fmt.Sprintf("#%d", maxInt(1, data.Rank)))
-	drawText(img, faces.SubTitle, tpl.MainStatCard.X+125, tpl.MainStatCard.Y+136, tpl.TextMuted, fmt.Sprintf("%d / %d", data.Elo, data.LevelTarget))
-	drawText(img, faces.SubTitle, tpl.MainStatCard.X+330, tpl.MainStatCard.Y+136, tpl.AccentPurple, fmt.Sprintf("%d до уровня", data.LevelRemaining))
-	drawHorizontalBar(img, tpl.MainStatCard.X+125, tpl.MainStatCard.Y+150, 205, 12, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(72, 81, 91), tpl.AccentPurple)
+	// ── Statistic Panel (левый блок) ──────────────────────────────────────
+	spX, spY, spW := tpl.StatPanel.X, tpl.StatPanel.Y, tpl.StatPanel.W
+	fillRoundedRect(img, spX, spY, spW, tpl.StatPanel.H, tpl.StatPanel.R, tpl.PanelColor)
+	drawText(img, faces.Title, spX+40, spY+60, tpl.TextPrimary, "Statistic")
 
-	fillRoundedRect(img, tpl.KDCard.X, tpl.KDCard.Y, tpl.KDCard.W, tpl.KDCard.H, tpl.KDCard.R, tpl.PanelDark)
-	drawProgressRing(img, tpl.KDCard.X+68, tpl.KDCard.Y+92, 52, 9, clampFloat(data.KD/2.0, 0, 1), rgba(93, 92, 96), tpl.AccentGreen)
-	drawText(img, faces.Display, tpl.KDCard.X+115, tpl.KDCard.Y+82, tpl.AccentGreen, fmt.Sprintf("%.2f", data.KD))
-	drawText(img, faces.SubTitle, tpl.KDCard.X+115, tpl.KDCard.Y+120, tpl.TextPrimary, "Рейтинг")
-	drawText(img, faces.SubTitle, tpl.KDCard.X+115, tpl.KDCard.Y+160, tpl.TextMuted, fmt.Sprintf("K/D %.2f   AVG %.0f", data.KD, data.Avg))
-	for idx, cell := range []struct {
-		Label string
-		Value string
-		Color color.RGBA
-	}{
-		{"Убийства", fmt.Sprintf("%d", data.Kills), rgba(245, 245, 245)},
-		{"Смерти", fmt.Sprintf("%d", data.Deaths), rgba(245, 245, 245)},
-		{"Ассисты", fmt.Sprintf("%d", data.Assists), rgba(245, 245, 245)},
-		{"AVG", fmt.Sprintf("%.0f", data.Avg), rgba(245, 245, 245)},
-		{"Победы", fmt.Sprintf("%d", data.Wins), rgba(55, 223, 146)},
-		{"Поражения", fmt.Sprintf("%d", data.Losses), rgba(255, 88, 116)},
-	} {
-		cx := tpl.KDCard.X + 20 + (idx%3)*145
-		cy := tpl.KDCard.Y + 188 + (idx/3)*82
-		fillRoundedRect(img, cx, cy, 132, 70, 12, rgba(62, 60, 65))
-		drawText(img, faces.Small, cx+12, cy+24, rgba(187, 187, 192), cell.Label)
-		drawText(img, faces.SubTitle, cx+12, cy+60, cell.Color, cell.Value)
+	// ELO карточка
+	mc := tpl.MainStatCard
+	fillRoundedRect(img, mc.X, mc.Y, mc.W, mc.H, mc.R, tpl.PanelDark)
+	drawProgressRing(img, mc.X+58, mc.Y+88, 46, 8, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(93, 92, 96), tpl.AccentPurple)
+	drawText(img, faces.Display, mc.X+118, mc.Y+92, tpl.TextPrimary, fmt.Sprintf("%d", data.Elo))
+	drawRightText(img, faces.BodyBold, mc.X+mc.W-18, mc.Y+60, tpl.TextMuted, fmt.Sprintf("#%d", maxInt(1, data.Rank)))
+	drawText(img, faces.BodyBold, mc.X+118, mc.Y+128, tpl.TextMuted, trimText(faces.BodyBold, fmt.Sprintf("%d / %d", data.Elo, data.LevelTarget), 120))
+	drawText(img, faces.BodyBold, mc.X+252, mc.Y+128, tpl.AccentPurple, trimText(faces.BodyBold, fmt.Sprintf("%d до уровня", data.LevelRemaining), mc.W-252-18))
+	drawHorizontalBar(img, mc.X+118, mc.Y+142, mc.W-136, 10, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(72, 81, 91), tpl.AccentPurple)
+
+	// KD карточка
+	kd := tpl.KDCard
+	fillRoundedRect(img, kd.X, kd.Y, kd.W, kd.H, kd.R, tpl.PanelDark)
+	drawProgressRing(img, kd.X+58, kd.Y+82, 48, 9, clampFloat(data.KD/2.0, 0, 1), rgba(93, 92, 96), tpl.AccentGreen)
+	drawText(img, faces.Display, kd.X+118, kd.Y+76, tpl.AccentGreen, fmt.Sprintf("%.2f", data.KD))
+	drawText(img, faces.BodyBold, kd.X+118, kd.Y+114, tpl.TextPrimary, "Рейтинг")
+	drawText(img, faces.BodyBold, kd.X+118, kd.Y+148, tpl.TextMuted, trimText(faces.BodyBold, fmt.Sprintf("K/D %.2f   AVG %.0f", data.KD, data.Avg), kd.W-136))
+	// Мини-ячейки статистики
+	cellW := (kd.W - 30) / 3
+	cells := []struct{ L, V string; C color.RGBA }{
+		{"Убийства", fmt.Sprintf("%d", data.Kills), tpl.TextPrimary},
+		{"Смерти", fmt.Sprintf("%d", data.Deaths), tpl.TextPrimary},
+		{"Ассисты", fmt.Sprintf("%d", data.Assists), tpl.TextPrimary},
+		{"AVG", fmt.Sprintf("%.0f", data.Avg), tpl.TextPrimary},
+		{"Победы", fmt.Sprintf("%d", data.Wins), tpl.AccentGreen},
+		{"Поражения", fmt.Sprintf("%d", data.Losses), tpl.AccentRed},
+	}
+	for idx, cell := range cells {
+		col2 := idx % 3
+		row2 := idx / 3
+		cx := kd.X + 10 + col2*(cellW+5)
+		cy := kd.Y + 172 + row2*78
+		fillRoundedRect(img, cx, cy, cellW, 68, 12, rgba(62, 60, 65))
+		drawText(img, faces.Tiny, cx+10, cy+22, rgba(187, 187, 192), trimText(faces.Tiny, cell.L, cellW-16))
+		drawText(img, faces.BodyBold, cx+10, cy+56, cell.C, trimText(faces.BodyBold, cell.V, cellW-16))
 	}
 
-	fillRoundedRect(img, tpl.HistoryCard.X, tpl.HistoryCard.Y, tpl.HistoryCard.W, tpl.HistoryCard.H, tpl.HistoryCard.R, tpl.PanelDark)
-	drawText(img, faces.BodyBold, tpl.HistoryCard.X+20, tpl.HistoryCard.Y+54, tpl.TextPrimary, "История рейтинга")
-	currentBarX := tpl.HistoryCard.X + 23
+	// История рейтинга
+	hc := tpl.HistoryCard
+	fillRoundedRect(img, hc.X, hc.Y, hc.W, hc.H, hc.R, tpl.PanelDark)
+	drawText(img, faces.BodyBold, hc.X+18, hc.Y+48, tpl.TextPrimary, "История рейтинга")
 	if len(data.RatingBars) > 0 {
 		minBar, maxBar := data.RatingBars[0], data.RatingBars[0]
 		for _, v := range data.RatingBars {
-			if v < minBar {
-				minBar = v
-			}
-			if v > maxBar {
-				maxBar = v
-			}
+			if v < minBar { minBar = v }
+			if v > maxBar { maxBar = v }
 		}
-			drawText(img, faces.Display, tpl.HistoryCard.X+20, tpl.HistoryCard.Y+116, tpl.TextPrimary, fmt.Sprintf("%d", data.Elo))
-			if len(data.RatingBars) > 1 {
-				delta := data.RatingBars[len(data.RatingBars)-1] - data.RatingBars[0]
-				colorDelta := tpl.AccentRed
-				if delta >= 0 {
-					colorDelta = tpl.AccentGreen
-				}
-				drawText(img, faces.SubTitle, tpl.HistoryCard.X+150, tpl.HistoryCard.Y+116, colorDelta, fmt.Sprintf("%+d", delta))
-			}
-			barBaseY := tpl.HistoryCard.Y + 284
-		for _, v := range data.RatingBars {
-			norm := 0.1
-			if maxBar > minBar {
-				norm = float64(v-minBar) / float64(maxBar-minBar)
-			}
-			barH := int(24 + norm*145)
-			fillRoundedRect(img, currentBarX, barBaseY-barH, 14, barH, 7, rgba(55, 223, 146))
-			currentBarX += 21
+		drawText(img, faces.Display, hc.X+18, hc.Y+112, tpl.TextPrimary, fmt.Sprintf("%d", data.Elo))
+		if len(data.RatingBars) > 1 {
+			delta := data.RatingBars[len(data.RatingBars)-1] - data.RatingBars[0]
+			dc := tpl.AccentRed; if delta >= 0 { dc = tpl.AccentGreen }
+			drawText(img, faces.SubTitle, hc.X+140, hc.Y+112, dc, fmt.Sprintf("%+d", delta))
+		}
+		barBaseY := hc.Y + hc.H - 50
+		barAreaH := hc.H - 160
+		barAreaW := hc.W - 36
+		barW2 := 14
+		barGap := 5
+		maxBarsInArea := barAreaW / (barW2 + barGap)
+		bars := data.RatingBars
+		if len(bars) > maxBarsInArea { bars = bars[len(bars)-maxBarsInArea:] }
+		for bidx, v := range bars {
+			norm := 0.08
+			if maxBar > minBar { norm = float64(v-minBar) / float64(maxBar-minBar) }
+			bh := int(20 + float64(barAreaH-20)*norm)
+			bx := hc.X + 18 + bidx*(barW2+barGap)
+			fillRoundedRect(img, bx, barBaseY-bh, barW2, bh, 5, tpl.AccentGreen)
 		}
 	}
-	drawText(img, faces.Body, tpl.HistoryCard.X+20, tpl.HistoryCard.Y+336, tpl.TextMuted, "27 сен.")
-	drawRightText(img, faces.Body, tpl.HistoryCard.X+tpl.HistoryCard.W-20, tpl.HistoryCard.Y+336, tpl.TextMuted, time.Now().Format("02 янв."))
+	drawText(img, faces.Tiny, hc.X+18, hc.Y+hc.H-14, tpl.TextMuted, data.JoinedAt.Format("02 янв."))
+	drawRightText(img, faces.Tiny, hc.X+hc.W-18, hc.Y+hc.H-14, tpl.TextMuted, time.Now().Format("02 янв."))
 
-	fillRoundedRect(img, tpl.ImpactCard.X, tpl.ImpactCard.Y, tpl.ImpactCard.W, tpl.ImpactCard.H, tpl.ImpactCard.R, tpl.PanelDark)
-	drawProgressRing(img, tpl.ImpactCard.X+85, tpl.ImpactCard.Y+54, 40, 8, clampFloat(data.Impact/2.0, 0, 1), rgba(93, 92, 96), tpl.AccentGreen)
-	drawText(img, faces.Display, tpl.ImpactCard.X+140, tpl.ImpactCard.Y+48, tpl.AccentGreen, fmt.Sprintf("%.2f", data.Impact))
-	drawText(img, faces.SubTitle, tpl.ImpactCard.X+140, tpl.ImpactCard.Y+82, tpl.TextPrimary, "Impact")
-	drawText(img, faces.SubTitle, tpl.ImpactCard.X+140, tpl.ImpactCard.Y+114, tpl.TextMuted, "Влияние на раунд")
+	// Impact карточка
+	ic := tpl.ImpactCard
+	fillRoundedRect(img, ic.X, ic.Y, ic.W, ic.H, ic.R, tpl.PanelDark)
+	drawProgressRing(img, ic.X+68, ic.Y+ic.H/2, 36, 7, clampFloat(data.Impact/2.0, 0, 1), rgba(93, 92, 96), tpl.AccentGreen)
+	drawText(img, faces.Display, ic.X+124, ic.Y+42, tpl.AccentGreen, fmt.Sprintf("%.2f", data.Impact))
+	drawText(img, faces.BodyBold, ic.X+124, ic.Y+76, tpl.TextPrimary, "Impact")
+	drawText(img, faces.BodyBold, ic.X+124, ic.Y+ic.H-10, tpl.TextMuted, "Влияние на раунд")
 
-	fillRoundedRect(img, tpl.InfoPanel.X, tpl.InfoPanel.Y, tpl.InfoPanel.W, tpl.InfoPanel.H, tpl.InfoPanel.R, tpl.PanelGreen)
-	statsTop := []struct{ Label, Value string }{
+	// ── Info Panel (правый верхний) ───────────────────────────────────────
+	ip := tpl.InfoPanel
+	fillRoundedRect(img, ip.X, ip.Y, ip.W, ip.H, ip.R, tpl.PanelGreen)
+	halfW := ip.W / 2
+	infoItems := []struct{ L, V string }{
 		{"Playtime", fmt.Sprintf("%dh", data.PlayHours)},
 		{"Join Date", data.JoinedAt.Format("02.01.2006")},
 		{"Games", fmt.Sprintf("%d", data.Games)},
 		{"MVP", fmt.Sprintf("%d", data.MVPs)},
 	}
-	for idx, item := range statsTop {
-		x := tpl.InfoPanel.X + 100 + (idx%2)*200
-		y := tpl.InfoPanel.Y + 68 + (idx/2)*92
-		drawText(img, faces.SubTitle, x, y, rgba(196, 196, 196), item.Label)
-		drawText(img, faces.Display, x, y+44, tpl.TextPrimary, item.Value)
+	for idx, item := range infoItems {
+		col2 := idx % 2
+		row2 := idx / 2
+		x := ip.X + 24 + col2*halfW
+		y := ip.Y + 56 + row2*90
+		drawText(img, faces.BodyBold, x, y, rgba(190, 190, 195), item.L)
+		drawText(img, faces.Title, x, y+48, tpl.TextPrimary, trimText(faces.Title, item.V, halfW-28))
 	}
 
-	fillRoundedRect(img, tpl.LeaguePanel.X, tpl.LeaguePanel.Y, tpl.LeaguePanel.W, tpl.LeaguePanel.H, tpl.LeaguePanel.R, tpl.PanelColor)
-	drawText(img, faces.SubTitle, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+60, rgba(196, 196, 196), "League")
-	drawText(img, faces.Title, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+122, tpl.TextPrimary, data.League)
-	drawText(img, faces.SubTitle, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+170, rgba(196, 196, 196), "Places")
+	// ── League Panel ──────────────────────────────────────────────────────
+	lp := tpl.LeaguePanel
+	fillRoundedRect(img, lp.X, lp.Y, lp.W, lp.H, lp.R, tpl.PanelColor)
+	drawText(img, faces.BodyBold, lp.X+28, lp.Y+52, rgba(190, 190, 195), "League")
+	drawText(img, faces.Title, lp.X+28, lp.Y+106, tpl.TextPrimary, trimText(faces.Title, data.League, lp.W-56))
+	drawText(img, faces.BodyBold, lp.X+28, lp.Y+152, rgba(190, 190, 195), "Places")
 	for idx, item := range data.Leaderboard {
-		y := tpl.LeaguePanel.Y + 242 + idx*100
-		drawText(img, faces.SubTitle, tpl.LeaguePanel.X+40, y, tpl.TextPrimary, fmt.Sprintf("#%d", idx+1))
-		drawRoundedImageFromURL(img, item.AvatarURL, tpl.LeaguePanel.X+98, y-52, 64, 64, 14, rgba(72, 70, 75))
-		drawText(img, faces.SubTitle, tpl.LeaguePanel.X+180, y, tpl.TextPrimary, trimText(faces.SubTitle, item.Name, 220))
+		y := lp.Y + 200 + idx*96
+		drawText(img, faces.BodyBold, lp.X+28, y+28, tpl.TextPrimary, fmt.Sprintf("#%d", idx+1))
+		drawRoundedImageFromURL(img, item.AvatarURL, lp.X+78, y, 54, 54, 12, rgba(72, 70, 75))
+		drawText(img, faces.BodyBold, lp.X+148, y+32, tpl.TextPrimary, trimText(faces.BodyBold, item.Name, lp.W-180))
 	}
-	fillRoundedRect(img, tpl.LeaguePanel.X+34, tpl.LeaguePanel.Y+424, tpl.LeaguePanel.W-74, 2, 0, tpl.AccentLine)
-	drawText(img, faces.Display, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+502, tpl.TextPrimary, fmt.Sprintf("#%d", maxInt(1, data.Rank)))
-	drawRoundedImageFromURL(img, data.AvatarURL, tpl.LeaguePanel.X+98, tpl.LeaguePanel.Y+446, 64, 64, 14, rgba(72, 70, 75))
-	drawText(img, faces.SubTitle, tpl.LeaguePanel.X+180, tpl.LeaguePanel.Y+496, tpl.AccentGreen, trimText(faces.SubTitle, data.DisplayName, 220))
+	lineY := lp.Y + 490
+	fillRoundedRect(img, lp.X+24, lineY, lp.W-48, 2, 0, tpl.AccentLine)
+	drawText(img, faces.BodyBold, lp.X+28, lineY+56, tpl.TextPrimary, fmt.Sprintf("#%d", maxInt(1, data.Rank)))
+	drawRoundedImageFromURL(img, data.AvatarURL, lp.X+78, lineY+16, 54, 54, 12, rgba(72, 70, 75))
+	drawText(img, faces.BodyBold, lp.X+148, lineY+48, tpl.AccentGreen, trimText(faces.BodyBold, data.DisplayName, lp.W-180))
 
-	fillRoundedRect(img, tpl.MapsPanel.X, tpl.MapsPanel.Y, tpl.MapsPanel.W, tpl.MapsPanel.H, tpl.MapsPanel.R, tpl.PanelColor)
-	drawText(img, faces.Title, tpl.MapsPanel.X+40, tpl.MapsPanel.Y+70, tpl.TextPrimary, "Map Statistic")
-	fillRoundedRect(img, tpl.MapOverviewCard.X, tpl.MapOverviewCard.Y, tpl.MapOverviewCard.W, tpl.MapOverviewCard.H, tpl.MapOverviewCard.R, tpl.PanelDark)
-	drawProgressRing(img, tpl.MapOverviewCard.X+80, tpl.MapOverviewCard.Y+95, 58, 8, float64(data.WinRate)/100.0, rgba(93, 92, 96), tpl.AccentGreen)
-	drawText(img, faces.Display, tpl.MapOverviewCard.X+146, tpl.MapOverviewCard.Y+92, tpl.AccentGreen, fmt.Sprintf("%d%%", data.WinRate))
-	drawText(img, faces.SubTitle, tpl.MapOverviewCard.X+146, tpl.MapOverviewCard.Y+130, tpl.TextPrimary, "Win Rate")
-	drawText(img, faces.SubTitle, tpl.MapOverviewCard.X+146, tpl.MapOverviewCard.Y+166, tpl.TextMuted, fmt.Sprintf("W = %d    L = %d", data.Wins, data.Losses))
-	drawHorizontalBar(img, tpl.MapOverviewCard.X+26, tpl.MapOverviewCard.Y+208, 240, 10, float64(data.WinRate)/100.0, rgba(72, 81, 91), tpl.AccentGreen)
+	// ── Map Statistic Panel ───────────────────────────────────────────────
+	mp2 := tpl.MapsPanel
+	fillRoundedRect(img, mp2.X, mp2.Y, mp2.W, mp2.H, mp2.R, tpl.PanelColor)
+	drawText(img, faces.Title, mp2.X+32, mp2.Y+62, tpl.TextPrimary, "Map Statistic")
 
+	// Win Rate обзорная карточка
+	ov := tpl.MapOverviewCard
+	fillRoundedRect(img, ov.X, ov.Y, ov.W, ov.H, ov.R, tpl.PanelDark)
+	drawProgressRing(img, ov.X+66, ov.Y+ov.H/2, 54, 8, float64(data.WinRate)/100.0, rgba(93, 92, 96), tpl.AccentGreen)
+	drawText(img, faces.Display, ov.X+134, ov.Y+86, tpl.AccentGreen, fmt.Sprintf("%d%%", data.WinRate))
+	drawText(img, faces.BodyBold, ov.X+134, ov.Y+124, tpl.TextPrimary, "Win Rate")
+	drawText(img, faces.BodyBold, ov.X+134, ov.Y+158, tpl.TextMuted, trimText(faces.BodyBold, fmt.Sprintf("W = %d    L = %d", data.Wins, data.Losses), ov.W-150))
+	drawHorizontalBar(img, ov.X+18, ov.Y+ov.H-30, ov.W-36, 10, float64(data.WinRate)/100.0, rgba(72, 81, 91), tpl.AccentGreen)
+
+	// Best Map
+	bm := tpl.BestMapCard
 	best := data.BestMap
-	fillRoundedRect(img, tpl.BestMapCard.X, tpl.BestMapCard.Y, tpl.BestMapCard.W, tpl.BestMapCard.H, tpl.BestMapCard.R, tpl.PanelDark)
-	drawText(img, faces.Title, tpl.BestMapCard.X+124, tpl.BestMapCard.Y+82, tpl.TextPrimary, best.Name)
-	drawText(img, faces.SubTitle, tpl.BestMapCard.X+128, tpl.BestMapCard.Y+132, rgba(196, 196, 196), fmt.Sprintf("W = %d     L = %d", best.Wins, best.Losses))
-	drawText(img, faces.SubTitle, tpl.BestMapCard.X+128, tpl.BestMapCard.Y+174, rgba(196, 196, 196), fmt.Sprintf("K/D = %.2f", best.KD))
-	drawText(img, faces.SubTitle, tpl.BestMapCard.X+128, tpl.BestMapCard.Y+216, rgba(196, 196, 196), fmt.Sprintf("W/R = %d%%", best.WR))
+	fillRoundedRect(img, bm.X, bm.Y, bm.W, bm.H, bm.R, tpl.PanelDark)
+	drawText(img, faces.BodyBold, bm.X+18, bm.Y+40, rgba(190, 190, 195), "BEST MAP")
+	drawText(img, faces.Title, bm.X+18, bm.Y+86, tpl.TextPrimary, trimText(faces.Title, best.Name, bm.W-30))
+	drawText(img, faces.BodyBold, bm.X+18, bm.Y+128, rgba(190, 190, 195), trimText(faces.BodyBold, fmt.Sprintf("W = %d   L = %d", best.Wins, best.Losses), bm.W-30))
+	drawText(img, faces.BodyBold, bm.X+18, bm.Y+166, rgba(190, 190, 195), fmt.Sprintf("K/D = %.2f", best.KD))
+	drawText(img, faces.BodyBold, bm.X+18, bm.Y+204, rgba(190, 190, 195), fmt.Sprintf("W/R = %d%%", best.WR))
 
-	mapStartX := tpl.MapGridX
-	mapStartY := tpl.MapGridY
+	// Сетка карт — 6 ячеек (3 колонки × 2 ряда)
+	gridCellW := (mp2.W - mp2.X - tpl.MapGridX + mp2.X - 24) / 3
+	if gridCellW < 160 { gridCellW = 165 }
 	for idx, card := range data.MapCards {
-		if idx >= 6 {
-			break
-		}
-		col := idx % 3
-		row := idx / 3
-		x := mapStartX + col*tpl.MapGridGapX
-		y := mapStartY + row*tpl.MapGridGapY
-		fillRoundedRect(img, x, y, tpl.MapGridW, tpl.MapGridH, 18, tpl.PanelDark)
-		drawText(img, faces.BodyBold, x+20, y+52, tpl.TextPrimary, trimText(faces.BodyBold, card.Name, 130))
-		drawText(img, faces.SubTitle, x+20, y+102, rgba(196, 196, 196), fmt.Sprintf("W = %d    L = %d", card.Wins, card.Losses))
-		drawText(img, faces.SubTitle, x+20, y+146, rgba(196, 196, 196), fmt.Sprintf("K/D = %.2f", card.KD))
-		drawText(img, faces.SubTitle, x+20, y+188, rgba(196, 196, 196), fmt.Sprintf("W/R = %d%%", card.WR))
+		if idx >= 6 { break }
+		col2 := idx % 3
+		row2 := idx / 3
+		gx := tpl.MapGridX + col2*(gridCellW+8)
+		gy := tpl.MapGridY + row2*tpl.MapGridGapY
+		gw := gridCellW
+		fillRoundedRect(img, gx, gy, gw, tpl.MapGridH, 16, tpl.PanelDark)
+		drawText(img, faces.BodyBold, gx+14, gy+42, tpl.TextPrimary, trimText(faces.BodyBold, card.Name, gw-20))
+		drawText(img, faces.BodyBold, gx+14, gy+84, rgba(190, 190, 195), trimText(faces.BodyBold, fmt.Sprintf("W = %d   L = %d", card.Wins, card.Losses), gw-20))
+		drawText(img, faces.BodyBold, gx+14, gy+122, rgba(190, 190, 195), fmt.Sprintf("K/D = %.2f", card.KD))
+		drawText(img, faces.BodyBold, gx+14, gy+160, rgba(190, 190, 195), fmt.Sprintf("W/R = %d%%", card.WR))
 	}
 
-	fillRoundedRect(img, tpl.RecentPanel.X, tpl.RecentPanel.Y, tpl.RecentPanel.W, tpl.RecentPanel.H, tpl.RecentPanel.R, tpl.PanelColor)
-	drawText(img, faces.Title, tpl.RecentPanel.X+128, tpl.RecentPanel.Y+80, tpl.TextPrimary, "Recent Matches")
-	gridX, gridY := tpl.RecentGridX, tpl.RecentGridY
+	// ── Recent Matches ────────────────────────────────────────────────────
+	rp := tpl.RecentPanel
+	fillRoundedRect(img, rp.X, rp.Y, rp.W, rp.H, rp.R, tpl.PanelColor)
+	drawCenteredText(img, faces.Title, rp.X+rp.W/2, rp.Y+68, tpl.TextPrimary, "Recent Matches")
+	// Вычислим размер ячейки по доступной ширине панели
+	recentPad := 20
+	recentTotalW := rp.W - recentPad*2
+	cellSize := (recentTotalW - 4*(tpl.RecentCols-1)) / tpl.RecentCols
+	if cellSize < 56 { cellSize = 56 }
+	gapCell := (recentTotalW - cellSize*tpl.RecentCols) / maxInt(1, tpl.RecentCols-1)
+	gx2 := rp.X + recentPad
+	gy2 := rp.Y + 100
 	for idx := 0; idx < tpl.RecentCols*tpl.RecentRows; idx++ {
-		col := idx % tpl.RecentCols
-		row := idx / tpl.RecentCols
-		x := gridX + col*tpl.RecentGap
-		y := gridY + row*tpl.RecentGap
+		col2 := idx % tpl.RecentCols
+		row2 := idx / tpl.RecentCols
+		x := gx2 + col2*(cellSize+gapCell)
+		y := gy2 + row2*(cellSize+8)
 		result := ""
-		if idx < len(data.RecentResults) {
-			result = data.RecentResults[idx]
-		}
+		if idx < len(data.RecentResults) { result = data.RecentResults[idx] }
 		boxColor := rgba(52, 50, 55)
 		textColor := rgba(80, 80, 86)
-		if result == "W" {
-			boxColor = rgba(15, 77, 49)
-			textColor = rgba(79, 245, 155)
-		}
-		if result == "L" {
-			boxColor = rgba(92, 27, 41)
-			textColor = rgba(255, 96, 122)
-		}
-		fillRoundedRect(img, x, y, tpl.RecentCell, tpl.RecentCell, 10, boxColor)
+		if result == "W" { boxColor = rgba(15, 77, 49); textColor = rgba(79, 245, 155) }
+		if result == "L" { boxColor = rgba(92, 27, 41); textColor = rgba(255, 96, 122) }
+		fillRoundedRect(img, x, y, cellSize, cellSize, 10, boxColor)
 		if result != "" {
-			drawCenteredText(img, faces.BodyBold, x+tpl.RecentCell/2, y+42, textColor, result)
+			drawCenteredText(img, faces.BodyBold, x+cellSize/2, y+cellSize/2+10, textColor, result)
 		}
-		}
+	}
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
