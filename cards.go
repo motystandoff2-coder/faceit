@@ -784,9 +784,9 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 	fillRoundedRect(img, tpl.MVPStat1.X, tpl.MVPStat1.Y, tpl.MVPStat1.W, tpl.MVPStat1.H, tpl.MVPStat1.R, rgba(28, 24, 34))
 	fillRoundedRect(img, tpl.MVPStat2.X, tpl.MVPStat2.Y, tpl.MVPStat2.W, tpl.MVPStat2.H, tpl.MVPStat2.R, rgba(28, 24, 34))
 	fillRoundedRect(img, tpl.MVPStat3.X, tpl.MVPStat3.Y, tpl.MVPStat3.W, tpl.MVPStat3.H, tpl.MVPStat3.R, rgba(28, 24, 34))
-	drawCenteredText(img, faces.Display, tpl.MVPStat1.X+tpl.MVPStat1.W/2, tpl.MVPStat1.Y+80, tpl.TextPrimary, fmt.Sprintf("%.2f", data.MVPRating))
-	drawCenteredText(img, faces.Display, tpl.MVPStat2.X+tpl.MVPStat2.W/2, tpl.MVPStat2.Y+80, tpl.TextPrimary, fmt.Sprintf("%.2f", data.MVPKD))
-	drawCenteredText(img, faces.Display, tpl.MVPStat3.X+tpl.MVPStat3.W/2, tpl.MVPStat3.Y+80, tpl.TextPrimary, fmt.Sprintf("%d", data.MVPAssists))
+	drawCenteredText(img, faces.Title, tpl.MVPStat1.X+tpl.MVPStat1.W/2, tpl.MVPStat1.Y+76, tpl.TextPrimary, fmt.Sprintf("%.2f", data.MVPRating))
+	drawCenteredText(img, faces.Title, tpl.MVPStat2.X+tpl.MVPStat2.W/2, tpl.MVPStat2.Y+76, tpl.TextPrimary, fmt.Sprintf("%.2f", data.MVPKD))
+	drawCenteredText(img, faces.Title, tpl.MVPStat3.X+tpl.MVPStat3.W/2, tpl.MVPStat3.Y+76, tpl.TextPrimary, fmt.Sprintf("%d", data.MVPAssists))
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {

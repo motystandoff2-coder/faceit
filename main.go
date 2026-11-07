@@ -941,9 +941,9 @@ func finalizeMatchStart(s *discordgo.Session, state *PickBanState, finalMap MapI
 
 	components := []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "Отправить ссылку на лобби", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("lobby_link_%d", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "🔗"}},
 			discordgo.Button{Label: "Получить ID хоста", Style: discordgo.PrimaryButton, CustomID: fmt.Sprintf("hostid_%d_%s", state.MatchID, state.TCapID), Emoji: &discordgo.ComponentEmoji{Name: "🆔"}},
-			discordgo.Button{Label: "Игрок не зашёл (0/6)", Style: discordgo.DangerButton, CustomID: fmt.Sprintf("noshow_%d", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "🚫"}},
+			discordgo.Button{Label: "Отправить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("send_result_match_%d", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
+			discordgo.Button{Label: "Игрок не зашёл (0/6)", Style: discordgo.DangerButton, CustomID: fmt.Sprintf("noshow_%d_0", state.MatchID), Emoji: &discordgo.ComponentEmoji{Name: "🚫"}},
 		}},
 	}
 
@@ -971,7 +971,7 @@ func finalizeMatchStart(s *discordgo.Session, state *PickBanState, finalMap MapI
 		}
 		_, _ = s.ChannelMessageSendComplex(state.ChannelID, &discordgo.MessageSend{Content: mentions, Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
 	}
-	_, _ = s.ChannelMessageSend(state.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби и нажми **Отправить ссылку на лобби**.", hostMention, state.MatchID))
+	_, _ = s.ChannelMessageSend(state.ChannelID, fmt.Sprintf("👑 %s — ты хост матча #%d. Создай лобби в игре. После матча нажми **Отправить результат**.", hostMention, state.MatchID))
 
 	// Создание приватных T/CT войсов и автоперенос
 	ch, _ := s.Channel(state.ChannelID)
@@ -1721,7 +1721,72 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Send result button
+	// Send result button from post-pick card (with pre-filled match ID)
+	if strings.HasPrefix(customID, "send_result_match_") {
+		matchIDStr := strings.TrimPrefix(customID, "send_result_match_")
+		matchID, _ := strconv.Atoi(matchIDStr)
+		var status string
+		_ = queryRowDB("SELECT status FROM matches WHERE id = ?", matchID).Scan(&status)
+		if status == "finished" { respondEphemeral(s, i, "❌ Этот матч уже зарегистрирован."); return }
+		if status == "review" { respondEphemeral(s, i, "❌ Результат уже на проверке."); return }
+		if status == "reporting" { respondEphemeral(s, i, "❌ Ветка отправки уже создана."); return }
+		thread, err := s.ThreadStartComplex(i.ChannelID, &discordgo.ThreadStart{
+			Name: fmt.Sprintf("Отчет матча #%d", matchID), AutoArchiveDuration: 60,
+			Type: discordgo.ChannelTypeGuildPrivateThread, Invitable: false,
+		})
+		if err != nil {
+			thread, err = s.ThreadStartComplex(i.ChannelID, &discordgo.ThreadStart{
+				Name: fmt.Sprintf("Отчет матча #%d", matchID), AutoArchiveDuration: 60,
+				Type: discordgo.ChannelTypeGuildPublicThread,
+			})
+		}
+		if err != nil { respondEphemeral(s, i, "❌ Ошибка создания ветки."); return }
+		_, _ = s.ChannelMessageSend(thread.ID, fmt.Sprintf("<@%s>, отправьте финальный скриншот матча #%d сюда.\nБот автоматически обработает статистику.", i.Member.User.ID, matchID))
+		_, _ = execDB("UPDATE matches SET status = 'reporting' WHERE id = ?", matchID)
+		respondEphemeral(s, i, fmt.Sprintf("✅ Ветка создана: <#%s>", thread.ID))
+		return
+	}
+
+	// No-show button with counter
+	if strings.HasPrefix(customID, "noshow_") {
+		parts := strings.Split(customID, "_")
+		if len(parts) >= 3 {
+			matchID, _ := strconv.Atoi(parts[1])
+			count, _ := strconv.Atoi(parts[2])
+			count++
+			if count >= 6 {
+				_, _ = execDB("UPDATE matches SET status = 'cancelled' WHERE id = ?", matchID)
+				respondEphemeral(s, i, fmt.Sprintf("❌ Матч #%d отменён — 6 игроков подтвердили неявку.", matchID))
+				// Update button to disabled
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseUpdateMessage,
+					Data: &discordgo.InteractionResponseData{
+						Components: []discordgo.MessageComponent{
+							discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+								discordgo.Button{Label: "Матч отменён", Style: discordgo.DangerButton, CustomID: "cancelled_noop", Disabled: true},
+							}},
+						},
+					},
+				})
+				return
+			}
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseUpdateMessage,
+				Data: &discordgo.InteractionResponseData{
+					Components: []discordgo.MessageComponent{
+						discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+							discordgo.Button{Label: "Получить ID хоста", Style: discordgo.PrimaryButton, CustomID: fmt.Sprintf("hostid_%d_%s", matchID, i.Member.User.ID), Emoji: &discordgo.ComponentEmoji{Name: "🆔"}},
+							discordgo.Button{Label: "Отправить результат", Style: discordgo.SuccessButton, CustomID: fmt.Sprintf("send_result_match_%d", matchID), Emoji: &discordgo.ComponentEmoji{Name: "📝"}},
+							discordgo.Button{Label: fmt.Sprintf("Игрок не зашёл (%d/6)", count), Style: discordgo.DangerButton, CustomID: fmt.Sprintf("noshow_%d_%d", matchID, count), Emoji: &discordgo.ComponentEmoji{Name: "🚫"}},
+						}},
+					},
+				},
+			})
+			return
+		}
+	}
+
+	// Send result button (from отправить-результаты channel)
 	if customID == "send_result" {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseModal,
