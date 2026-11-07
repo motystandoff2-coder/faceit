@@ -678,29 +678,30 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 		return nil, err
 	}
 	faces := loadCardFaces()
-	w, h := 1600, 900
+	tpl := DefaultMatchCardTemplate
+	w, h := tpl.CanvasW, tpl.CanvasH
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	fillGradient(img, 0, 0, w, h, rgba(38, 8, 52), rgba(17, 62, 8), false)
-	fillRoundedRect(img, 28, 24, w-56, h-48, 34, rgbaA(20, 17, 25, 235))
-	drawText(img, faces.DisplayLarge, 58, 98, rgba(148, 133, 160), fmt.Sprintf("#%d", data.MatchID))
-	drawRightText(img, faces.Title, w-52, 74, rgba(247, 247, 247), "ELITE FPL")
+	fillGradient(img, 0, 0, w, h, tpl.BackgroundLeft, tpl.BackgroundRight, false)
+	fillRoundedRect(img, tpl.Frame.X, tpl.Frame.Y, tpl.Frame.W, tpl.Frame.H, tpl.Frame.R, tpl.FrameColor)
+	drawText(img, faces.DisplayLarge, tpl.MatchIDX, tpl.MatchIDBaseline, rgba(148, 133, 160), fmt.Sprintf("#%d", data.MatchID))
+	drawRightText(img, faces.Title, tpl.LogoRight, tpl.LogoBaseline, tpl.TextPrimary, "ELITE FPL")
 
-	fillRoundedGradientRect(img, 46, 132, w-92, 92, 26, rgba(116, 42, 140), rgba(31, 108, 19), false)
-	fillRoundedRect(img, 58, 144, 74, 68, 20, rgba(40, 35, 48))
-	fillRoundedRect(img, w-132, 144, 74, 68, 20, rgba(40, 35, 48))
-	drawText(img, faces.SubTitle, 150, 190, rgba(235, 223, 242), "COUNTER-TERRORISTS")
-	drawRightText(img, faces.SubTitle, w-150, 190, rgba(219, 242, 219), "TERRORISTS")
-	drawCenteredText(img, faces.BodyBold, w/2, 176, rgba(150, 150, 150), "SCORE")
-	drawCenteredText(img, faces.Display, w/2, 214, rgba(255, 255, 255), fmt.Sprintf("%d:%d", data.ScoreCT, data.ScoreT))
+	fillRoundedGradientRect(img, tpl.Header.X, tpl.Header.Y, tpl.Header.W, tpl.Header.H, tpl.Header.R, tpl.HeaderLeft, tpl.HeaderRight, false)
+	fillRoundedRect(img, tpl.HeaderLeftIcon.X, tpl.HeaderLeftIcon.Y, tpl.HeaderLeftIcon.W, tpl.HeaderLeftIcon.H, tpl.HeaderLeftIcon.R, rgba(40, 35, 48))
+	fillRoundedRect(img, tpl.HeaderRightIcon.X, tpl.HeaderRightIcon.Y, tpl.HeaderRightIcon.W, tpl.HeaderRightIcon.H, tpl.HeaderRightIcon.R, rgba(40, 35, 48))
+	drawText(img, faces.SubTitle, tpl.HeaderLeftIcon.X+92, tpl.Header.Y+58, rgba(235, 223, 242), "COUNTER-TERRORISTS")
+	drawRightText(img, faces.SubTitle, tpl.Header.X+tpl.Header.W-104, tpl.Header.Y+58, rgba(219, 242, 219), "TERRORISTS")
+	drawCenteredText(img, faces.BodyBold, w/2, tpl.ScoreTitleY, tpl.TextMuted, "SCORE")
+	drawCenteredText(img, faces.Display, w/2, tpl.ScoreValueY, tpl.TextPrimary, fmt.Sprintf("%d:%d", data.ScoreCT, data.ScoreT))
 
-	leftX := 48
-	rightX := 815
-	tableY := 266
-	rowH := 78
-	playerW := 390
-	statW := 64
-	gap := 8
-	labelColor := rgba(239, 239, 239)
+	leftX := tpl.LeftTableX
+	rightX := tpl.RightTableX
+	tableY := tpl.TableHeaderY
+	rowH := tpl.TableRowH
+	playerW := tpl.PlayerW
+	statW := tpl.StatW
+	gap := tpl.Gap
+	labelColor := tpl.TextPrimary
 	drawText(img, faces.Body, leftX, tableY, labelColor, "PLAYER")
 	cols := []string{"K", "D", "K/D", "A", "RATING"}
 	for idx, label := range cols {
@@ -719,27 +720,27 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 			if idx < len(rows) {
 				row = rows[idx]
 			}
-			y := tableY + 22 + idx*rowH
+			y := tableY + tpl.TableRowOffsetY + idx*rowH
 			if isLeft {
 				fillRoundedRect(img, leftX, y, playerW, 64, 18, rgba(47, 44, 49))
 				for col := 0; col < 5; col++ {
 					boxX := leftX + playerW + gap + col*(statW+gap)
 					shade := rgba(49, 45, 53)
 					if col == 4 {
-						shade = rgba(72, 23, 116)
+						shade = tpl.AccentCT
 					}
 					fillRoundedRect(img, boxX, y, statW, 64, 14, shade)
 				}
 				if row.Name != "" {
-					nameColor := rgba(240, 240, 240)
+					nameColor := tpl.TextPrimary
 					if idx == 0 {
-						nameColor = rgba(74, 230, 156)
+						nameColor = tpl.AccentHighlight
 					}
 					drawText(img, faces.SubTitle, leftX+18, y+42, nameColor, trimText(faces.SubTitle, row.Name, playerW-30))
 					vals := []string{fmt.Sprintf("%d", row.Kills), fmt.Sprintf("%d", row.Deaths), fmt.Sprintf("%.2f", row.KD), fmt.Sprintf("%d", row.Assists), fmt.Sprintf("%.2f", row.Rating)}
 					for col, val := range vals {
 						boxX := leftX + playerW + gap + col*(statW+gap)
-						drawCenteredText(img, faces.SubTitle, boxX+statW/2, y+44, rgba(244, 244, 244), val)
+						drawCenteredText(img, faces.SubTitle, boxX+statW/2, y+44, tpl.TextPrimary, val)
 					}
 				}
 			} else {
@@ -747,7 +748,7 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 					boxX := rightX + col*(statW+gap)
 					shade := rgba(47, 52, 46)
 					if col == 0 {
-						shade = rgba(18, 90, 20)
+						shade = tpl.AccentT
 					}
 					fillRoundedRect(img, boxX, y, statW, 64, 14, shade)
 				}
@@ -757,9 +758,9 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 					vals := []string{fmt.Sprintf("%d", row.Kills), fmt.Sprintf("%d", row.Deaths), fmt.Sprintf("%.2f", row.KD), fmt.Sprintf("%d", row.Assists), fmt.Sprintf("%.2f", row.Rating)}
 					for col, val := range vals {
 						boxX := rightX + col*(statW+gap)
-						drawCenteredText(img, faces.SubTitle, boxX+statW/2, y+44, rgba(244, 244, 244), val)
+						drawCenteredText(img, faces.SubTitle, boxX+statW/2, y+44, tpl.TextPrimary, val)
 					}
-					drawRightText(img, faces.SubTitle, nameX+playerW-18, y+42, rgba(244, 244, 244), trimText(faces.SubTitle, row.Name, playerW-30))
+					drawRightText(img, faces.SubTitle, nameX+playerW-18, y+42, tpl.TextPrimary, trimText(faces.SubTitle, row.Name, playerW-30))
 				}
 			}
 		}
@@ -767,25 +768,25 @@ func renderMatchCardPNG(s *discordgo.Session, matchID int) ([]byte, error) {
 	drawMatchRows(data.CTPlayers, true)
 	drawMatchRows(data.TPlayers, false)
 
-	drawText(img, faces.Body, 58, 708, rgba(226, 226, 226), "MAP INFO")
-	fillRoundedRect(img, 58, 728, 730, 150, 24, rgba(39, 35, 46))
-	drawCenteredText(img, faces.Italic, 423, 790, rgba(192, 192, 192), "Picked map")
-	drawCenteredText(img, faces.Display, 423, 842, rgba(255, 255, 255), data.MapName)
+	drawText(img, faces.Body, tpl.BottomLeftCard.X, tpl.BottomLeftTitleY, rgba(226, 226, 226), "MAP INFO")
+	fillRoundedRect(img, tpl.BottomLeftCard.X, tpl.BottomLeftCard.Y, tpl.BottomLeftCard.W, tpl.BottomLeftCard.H, tpl.BottomLeftCard.R, tpl.PanelColor)
+	drawCenteredText(img, faces.Italic, tpl.BottomLeftCard.X+tpl.BottomLeftCard.W/2, tpl.BottomLeftCard.Y+62, rgba(192, 192, 192), "Picked map")
+	drawCenteredText(img, faces.Display, tpl.BottomLeftCard.X+tpl.BottomLeftCard.W/2, tpl.BottomLeftCard.Y+114, tpl.TextPrimary, data.MapName)
 
-	drawText(img, faces.Body, 850, 708, rgba(226, 226, 226), "PLAYER INFO")
-	drawText(img, faces.Body, 1282, 708, rgba(226, 226, 226), "RATING")
-	drawText(img, faces.Body, 1406, 708, rgba(226, 226, 226), "K/D")
-	drawText(img, faces.Body, 1500, 708, rgba(226, 226, 226), "A")
-	fillRoundedRect(img, 850, 728, 702, 150, 24, rgba(39, 35, 46))
-	drawRoundedImageFromURL(img, data.MVP.AvatarURL, 864, 742, 140, 120, 18, rgba(52, 48, 55))
-	drawText(img, faces.Italic, 1036, 794, rgba(198, 198, 198), "Game MVP")
-	drawText(img, faces.Display, 1036, 844, rgba(255, 255, 255), trimText(faces.Display, data.MVP.Name, 320))
-	fillRoundedRect(img, 1260, 742, 96, 120, 20, rgba(28, 24, 34))
-	fillRoundedRect(img, 1378, 742, 96, 120, 20, rgba(28, 24, 34))
-	fillRoundedRect(img, 1496, 742, 96, 120, 20, rgba(28, 24, 34))
-	drawCenteredText(img, faces.Display, 1308, 822, rgba(255, 255, 255), fmt.Sprintf("%.2f", data.MVPRating))
-	drawCenteredText(img, faces.Display, 1426, 822, rgba(255, 255, 255), fmt.Sprintf("%.2f", data.MVPKD))
-	drawCenteredText(img, faces.Display, 1544, 822, rgba(255, 255, 255), fmt.Sprintf("%d", data.MVPAssists))
+	drawText(img, faces.Body, tpl.BottomRightCard.X, tpl.BottomLeftTitleY, rgba(226, 226, 226), "PLAYER INFO")
+	drawText(img, faces.Body, tpl.MVPStat1.X+14, tpl.BottomLeftTitleY, rgba(226, 226, 226), "RATING")
+	drawText(img, faces.Body, tpl.MVPStat2.X+28, tpl.BottomLeftTitleY, rgba(226, 226, 226), "K/D")
+	drawText(img, faces.Body, tpl.MVPStat3.X+36, tpl.BottomLeftTitleY, rgba(226, 226, 226), "A")
+	fillRoundedRect(img, tpl.BottomRightCard.X, tpl.BottomRightCard.Y, tpl.BottomRightCard.W, tpl.BottomRightCard.H, tpl.BottomRightCard.R, tpl.PanelColor)
+	drawRoundedImageFromURL(img, data.MVP.AvatarURL, tpl.MVPAvatar.X, tpl.MVPAvatar.Y, tpl.MVPAvatar.W, tpl.MVPAvatar.H, tpl.MVPAvatar.R, rgba(52, 48, 55))
+	drawText(img, faces.Italic, tpl.MVPAvatar.X+172, tpl.MVPAvatar.Y+52, rgba(198, 198, 198), "Game MVP")
+	drawText(img, faces.Display, tpl.MVPAvatar.X+172, tpl.MVPAvatar.Y+102, tpl.TextPrimary, trimText(faces.Display, data.MVP.Name, 320))
+	fillRoundedRect(img, tpl.MVPStat1.X, tpl.MVPStat1.Y, tpl.MVPStat1.W, tpl.MVPStat1.H, tpl.MVPStat1.R, rgba(28, 24, 34))
+	fillRoundedRect(img, tpl.MVPStat2.X, tpl.MVPStat2.Y, tpl.MVPStat2.W, tpl.MVPStat2.H, tpl.MVPStat2.R, rgba(28, 24, 34))
+	fillRoundedRect(img, tpl.MVPStat3.X, tpl.MVPStat3.Y, tpl.MVPStat3.W, tpl.MVPStat3.H, tpl.MVPStat3.R, rgba(28, 24, 34))
+	drawCenteredText(img, faces.Display, tpl.MVPStat1.X+tpl.MVPStat1.W/2, tpl.MVPStat1.Y+80, tpl.TextPrimary, fmt.Sprintf("%.2f", data.MVPRating))
+	drawCenteredText(img, faces.Display, tpl.MVPStat2.X+tpl.MVPStat2.W/2, tpl.MVPStat2.Y+80, tpl.TextPrimary, fmt.Sprintf("%.2f", data.MVPKD))
+	drawCenteredText(img, faces.Display, tpl.MVPStat3.X+tpl.MVPStat3.W/2, tpl.MVPStat3.Y+80, tpl.TextPrimary, fmt.Sprintf("%d", data.MVPAssists))
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
@@ -800,37 +801,37 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 		return nil, err
 	}
 	faces := loadCardFaces()
-	w, h := 1600, 1800
+	tpl := DefaultProfileCardTemplate
+	w, h := tpl.CanvasW, tpl.CanvasH
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	fillGradient(img, 0, 0, w, h, rgba(54, 12, 74), rgba(17, 79, 11), false)
+	fillGradient(img, 0, 0, w, h, tpl.BackgroundLeft, tpl.BackgroundRight, false)
 
-	banner := image.Rect(70, 40, w-70, 220)
-	fillRoundedRect(img, banner.Min.X, banner.Min.Y, banner.Dx(), banner.Dy(), 38, rgbaA(35, 33, 37, 235))
-	drawRoundedImageFromURL(img, data.AvatarURL, 106, 78, 200, 200, 28, rgba(70, 70, 75))
-	drawText(img, faces.Display, 340, 174, rgba(245, 245, 245), trimText(faces.Display, data.DisplayName, 420))
-	drawText(img, faces.SubTitle, 340, 214, rgba(155, 155, 166), fmt.Sprintf("#%d", data.ProjectID))
-	drawText(img, faces.SubTitle, 480, 214, rgba(155, 155, 166), fmt.Sprintf("ID: %s", data.GameID))
+	fillRoundedRect(img, tpl.Banner.X, tpl.Banner.Y, tpl.Banner.W, tpl.Banner.H, tpl.Banner.R, tpl.PanelColor)
+	drawRoundedImageFromURL(img, data.AvatarURL, tpl.BannerAvatar.X, tpl.BannerAvatar.Y, tpl.BannerAvatar.W, tpl.BannerAvatar.H, tpl.BannerAvatar.R, rgba(70, 70, 75))
+	drawText(img, faces.Display, tpl.BannerNameX, tpl.BannerNameY, tpl.TextPrimary, trimText(faces.Display, data.DisplayName, 420))
+	drawText(img, faces.SubTitle, tpl.BannerNameX, tpl.BannerMetaY, tpl.TextMuted, fmt.Sprintf("#%d", data.ProjectID))
+	drawText(img, faces.SubTitle, tpl.BannerGameIDX, tpl.BannerMetaY, tpl.TextMuted, fmt.Sprintf("ID: %s", data.GameID))
 	for i := 0; i < 4; i++ {
-		fillRoundedRect(img, 1240+i*64, 120, 56, 56, 12, rgba(54, 52, 57))
+		fillRoundedRect(img, 1240+i*64, tpl.TopIconY, tpl.TopIconSize, tpl.TopIconSize, 12, rgba(54, 52, 57))
 	}
 
-	leftPanelX, leftPanelY := 70, 330
-	leftPanelW, leftPanelH := 960, 690
-	fillRoundedRect(img, leftPanelX, leftPanelY, leftPanelW, leftPanelH, 34, rgbaA(35, 33, 37, 235))
+	leftPanelX, leftPanelY := tpl.StatPanel.X, tpl.StatPanel.Y
+	leftPanelW, leftPanelH := tpl.StatPanel.W, tpl.StatPanel.H
+	fillRoundedRect(img, leftPanelX, leftPanelY, leftPanelW, leftPanelH, tpl.StatPanel.R, tpl.PanelColor)
 	drawText(img, faces.Title, leftPanelX+110, leftPanelY+66, rgba(241, 241, 241), "Statistic")
-	fillRoundedRect(img, leftPanelX+50, leftPanelY+96, 455, 185, 24, rgba(52, 50, 55))
-	drawProgressRing(img, leftPanelX+118, leftPanelY+188, 46, 8, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(93, 92, 96), rgba(195, 71, 255))
-	drawText(img, faces.Display, leftPanelX+175, leftPanelY+188, rgba(243, 243, 243), fmt.Sprintf("%d", data.Elo))
-	drawRightText(img, faces.SubTitle, leftPanelX+485, leftPanelY+188, rgba(241, 241, 241), fmt.Sprintf("#%d", maxInt(1, data.Rank)))
-	drawText(img, faces.SubTitle, leftPanelX+175, leftPanelY+232, rgba(154, 154, 162), fmt.Sprintf("%d / %d", data.Elo, data.LevelTarget))
-	drawText(img, faces.SubTitle, leftPanelX+380, leftPanelY+232, rgba(190, 82, 255), fmt.Sprintf("%d до уровня", data.LevelRemaining))
-	drawHorizontalBar(img, leftPanelX+175, leftPanelY+246, 205, 12, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(72, 81, 91), rgba(194, 72, 255))
+	fillRoundedRect(img, tpl.MainStatCard.X, tpl.MainStatCard.Y, tpl.MainStatCard.W, tpl.MainStatCard.H, tpl.MainStatCard.R, tpl.PanelDark)
+	drawProgressRing(img, tpl.MainStatCard.X+68, tpl.MainStatCard.Y+92, 46, 8, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(93, 92, 96), tpl.AccentPurple)
+	drawText(img, faces.Display, tpl.MainStatCard.X+125, tpl.MainStatCard.Y+92, tpl.TextPrimary, fmt.Sprintf("%d", data.Elo))
+	drawRightText(img, faces.SubTitle, tpl.MainStatCard.X+tpl.MainStatCard.W-20, tpl.MainStatCard.Y+92, tpl.TextPrimary, fmt.Sprintf("#%d", maxInt(1, data.Rank)))
+	drawText(img, faces.SubTitle, tpl.MainStatCard.X+125, tpl.MainStatCard.Y+136, tpl.TextMuted, fmt.Sprintf("%d / %d", data.Elo, data.LevelTarget))
+	drawText(img, faces.SubTitle, tpl.MainStatCard.X+330, tpl.MainStatCard.Y+136, tpl.AccentPurple, fmt.Sprintf("%d до уровня", data.LevelRemaining))
+	drawHorizontalBar(img, tpl.MainStatCard.X+125, tpl.MainStatCard.Y+150, 205, 12, float64(data.Elo)/float64(maxInt(1000, data.LevelTarget)), rgba(72, 81, 91), tpl.AccentPurple)
 
-	fillRoundedRect(img, leftPanelX+50, leftPanelY+300, 455, 245, 24, rgba(52, 50, 55))
-	drawProgressRing(img, leftPanelX+118, leftPanelY+392, 52, 9, clampFloat(data.KD/2.0, 0, 1), rgba(93, 92, 96), rgba(55, 223, 146))
-	drawText(img, faces.Display, leftPanelX+165, leftPanelY+382, rgba(57, 224, 149), fmt.Sprintf("%.2f", data.KD))
-	drawText(img, faces.SubTitle, leftPanelX+165, leftPanelY+420, rgba(245, 245, 245), "Рейтинг")
-	drawText(img, faces.SubTitle, leftPanelX+165, leftPanelY+460, rgba(155, 155, 166), fmt.Sprintf("K/D %.2f   AVG %.0f", data.KD, data.Avg))
+	fillRoundedRect(img, tpl.KDCard.X, tpl.KDCard.Y, tpl.KDCard.W, tpl.KDCard.H, tpl.KDCard.R, tpl.PanelDark)
+	drawProgressRing(img, tpl.KDCard.X+68, tpl.KDCard.Y+92, 52, 9, clampFloat(data.KD/2.0, 0, 1), rgba(93, 92, 96), tpl.AccentGreen)
+	drawText(img, faces.Display, tpl.KDCard.X+115, tpl.KDCard.Y+82, tpl.AccentGreen, fmt.Sprintf("%.2f", data.KD))
+	drawText(img, faces.SubTitle, tpl.KDCard.X+115, tpl.KDCard.Y+120, tpl.TextPrimary, "Рейтинг")
+	drawText(img, faces.SubTitle, tpl.KDCard.X+115, tpl.KDCard.Y+160, tpl.TextMuted, fmt.Sprintf("K/D %.2f   AVG %.0f", data.KD, data.Avg))
 	for idx, cell := range []struct {
 		Label string
 		Value string
@@ -843,16 +844,16 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 		{"Победы", fmt.Sprintf("%d", data.Wins), rgba(55, 223, 146)},
 		{"Поражения", fmt.Sprintf("%d", data.Losses), rgba(255, 88, 116)},
 	} {
-		cx := leftPanelX + 70 + (idx%3)*145
-		cy := leftPanelY + 488 + (idx/3)*82
+		cx := tpl.KDCard.X + 20 + (idx%3)*145
+		cy := tpl.KDCard.Y + 188 + (idx/3)*82
 		fillRoundedRect(img, cx, cy, 132, 70, 12, rgba(62, 60, 65))
 		drawText(img, faces.Small, cx+12, cy+24, rgba(187, 187, 192), cell.Label)
 		drawText(img, faces.SubTitle, cx+12, cy+60, cell.Color, cell.Value)
 	}
 
-	fillRoundedRect(img, leftPanelX+525, leftPanelY+96, 405, 350, 24, rgba(52, 50, 55))
-	drawText(img, faces.BodyBold, leftPanelX+545, leftPanelY+150, rgba(245, 245, 245), "История рейтинга")
-	currentBarX := leftPanelX + 548
+	fillRoundedRect(img, tpl.HistoryCard.X, tpl.HistoryCard.Y, tpl.HistoryCard.W, tpl.HistoryCard.H, tpl.HistoryCard.R, tpl.PanelDark)
+	drawText(img, faces.BodyBold, tpl.HistoryCard.X+20, tpl.HistoryCard.Y+54, tpl.TextPrimary, "История рейтинга")
+	currentBarX := tpl.HistoryCard.X + 23
 	if len(data.RatingBars) > 0 {
 		minBar, maxBar := data.RatingBars[0], data.RatingBars[0]
 		for _, v := range data.RatingBars {
@@ -863,16 +864,16 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 				maxBar = v
 			}
 		}
-		drawText(img, faces.Display, leftPanelX+545, leftPanelY+212, rgba(245, 245, 245), fmt.Sprintf("%d", data.Elo))
-		if len(data.RatingBars) > 1 {
-			delta := data.RatingBars[len(data.RatingBars)-1] - data.RatingBars[0]
-			colorDelta := rgba(255, 88, 116)
-			if delta >= 0 {
-				colorDelta = rgba(55, 223, 146)
+			drawText(img, faces.Display, tpl.HistoryCard.X+20, tpl.HistoryCard.Y+116, tpl.TextPrimary, fmt.Sprintf("%d", data.Elo))
+			if len(data.RatingBars) > 1 {
+				delta := data.RatingBars[len(data.RatingBars)-1] - data.RatingBars[0]
+				colorDelta := tpl.AccentRed
+				if delta >= 0 {
+					colorDelta = tpl.AccentGreen
+				}
+				drawText(img, faces.SubTitle, tpl.HistoryCard.X+150, tpl.HistoryCard.Y+116, colorDelta, fmt.Sprintf("%+d", delta))
 			}
-			drawText(img, faces.SubTitle, leftPanelX+675, leftPanelY+212, colorDelta, fmt.Sprintf("%+d", delta))
-		}
-		barBaseY := leftPanelY + 360
+			barBaseY := tpl.HistoryCard.Y + 284
 		for _, v := range data.RatingBars {
 			norm := 0.1
 			if maxBar > minBar {
@@ -883,16 +884,16 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 			currentBarX += 21
 		}
 	}
-	drawText(img, faces.Body, leftPanelX+545, leftPanelY+412, rgba(155, 155, 166), "27 сен.")
-	drawRightText(img, faces.Body, leftPanelX+910, leftPanelY+412, rgba(155, 155, 166), time.Now().Format("02 янв."))
+	drawText(img, faces.Body, tpl.HistoryCard.X+20, tpl.HistoryCard.Y+336, tpl.TextMuted, "27 сен.")
+	drawRightText(img, faces.Body, tpl.HistoryCard.X+tpl.HistoryCard.W-20, tpl.HistoryCard.Y+336, tpl.TextMuted, time.Now().Format("02 янв."))
 
-	fillRoundedRect(img, leftPanelX+525, leftPanelY+466, 405, 100, 24, rgba(52, 50, 55))
-	drawProgressRing(img, leftPanelX+610, leftPanelY+520, 40, 8, clampFloat(data.Impact/2.0, 0, 1), rgba(93, 92, 96), rgba(55, 223, 146))
-	drawText(img, faces.Display, leftPanelX+665, leftPanelY+514, rgba(55, 223, 146), fmt.Sprintf("%.2f", data.Impact))
-	drawText(img, faces.SubTitle, leftPanelX+665, leftPanelY+548, rgba(245, 245, 245), "Impact")
-	drawText(img, faces.SubTitle, leftPanelX+665, leftPanelY+580, rgba(155, 155, 166), "Влияние на раунд")
+	fillRoundedRect(img, tpl.ImpactCard.X, tpl.ImpactCard.Y, tpl.ImpactCard.W, tpl.ImpactCard.H, tpl.ImpactCard.R, tpl.PanelDark)
+	drawProgressRing(img, tpl.ImpactCard.X+85, tpl.ImpactCard.Y+54, 40, 8, clampFloat(data.Impact/2.0, 0, 1), rgba(93, 92, 96), tpl.AccentGreen)
+	drawText(img, faces.Display, tpl.ImpactCard.X+140, tpl.ImpactCard.Y+48, tpl.AccentGreen, fmt.Sprintf("%.2f", data.Impact))
+	drawText(img, faces.SubTitle, tpl.ImpactCard.X+140, tpl.ImpactCard.Y+82, tpl.TextPrimary, "Impact")
+	drawText(img, faces.SubTitle, tpl.ImpactCard.X+140, tpl.ImpactCard.Y+114, tpl.TextMuted, "Влияние на раунд")
 
-	fillRoundedRect(img, 1060, 330, 470, 210, 32, rgbaA(30, 36, 25, 235))
+	fillRoundedRect(img, tpl.InfoPanel.X, tpl.InfoPanel.Y, tpl.InfoPanel.W, tpl.InfoPanel.H, tpl.InfoPanel.R, tpl.PanelGreen)
 	statsTop := []struct{ Label, Value string }{
 		{"Playtime", fmt.Sprintf("%dh", data.PlayHours)},
 		{"Join Date", data.JoinedAt.Format("02.01.2006")},
@@ -900,68 +901,68 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 		{"MVP", fmt.Sprintf("%d", data.MVPs)},
 	}
 	for idx, item := range statsTop {
-		x := 1160 + (idx%2)*200
-		y := 398 + (idx/2)*92
+		x := tpl.InfoPanel.X + 100 + (idx%2)*200
+		y := tpl.InfoPanel.Y + 68 + (idx/2)*92
 		drawText(img, faces.SubTitle, x, y, rgba(196, 196, 196), item.Label)
-		drawText(img, faces.Display, x, y+44, rgba(245, 245, 245), item.Value)
+		drawText(img, faces.Display, x, y+44, tpl.TextPrimary, item.Value)
 	}
 
-	fillRoundedRect(img, 1060, 570, 470, 530, 32, rgbaA(35, 33, 37, 235))
-	drawText(img, faces.SubTitle, 1098, 630, rgba(196, 196, 196), "League")
-	drawText(img, faces.Title, 1098, 692, rgba(245, 245, 245), data.League)
-	drawText(img, faces.SubTitle, 1098, 740, rgba(196, 196, 196), "Places")
+	fillRoundedRect(img, tpl.LeaguePanel.X, tpl.LeaguePanel.Y, tpl.LeaguePanel.W, tpl.LeaguePanel.H, tpl.LeaguePanel.R, tpl.PanelColor)
+	drawText(img, faces.SubTitle, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+60, rgba(196, 196, 196), "League")
+	drawText(img, faces.Title, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+122, tpl.TextPrimary, data.League)
+	drawText(img, faces.SubTitle, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+170, rgba(196, 196, 196), "Places")
 	for idx, item := range data.Leaderboard {
-		y := 812 + idx*100
-		drawText(img, faces.SubTitle, 1100, y, rgba(245, 245, 245), fmt.Sprintf("#%d", idx+1))
-		drawRoundedImageFromURL(img, item.AvatarURL, 1158, y-52, 64, 64, 14, rgba(72, 70, 75))
-		drawText(img, faces.SubTitle, 1240, y, rgba(245, 245, 245), trimText(faces.SubTitle, item.Name, 220))
+		y := tpl.LeaguePanel.Y + 242 + idx*100
+		drawText(img, faces.SubTitle, tpl.LeaguePanel.X+40, y, tpl.TextPrimary, fmt.Sprintf("#%d", idx+1))
+		drawRoundedImageFromURL(img, item.AvatarURL, tpl.LeaguePanel.X+98, y-52, 64, 64, 14, rgba(72, 70, 75))
+		drawText(img, faces.SubTitle, tpl.LeaguePanel.X+180, y, tpl.TextPrimary, trimText(faces.SubTitle, item.Name, 220))
 	}
-	fillRoundedRect(img, 1094, 994, 396, 2, 0, rgba(110, 110, 110))
-	drawText(img, faces.Display, 1098, 1072, rgba(245, 245, 245), fmt.Sprintf("#%d", maxInt(1, data.Rank)))
-	drawRoundedImageFromURL(img, data.AvatarURL, 1158, 1016, 64, 64, 14, rgba(72, 70, 75))
-	drawText(img, faces.SubTitle, 1240, 1066, rgba(55, 223, 146), trimText(faces.SubTitle, data.DisplayName, 220))
+	fillRoundedRect(img, tpl.LeaguePanel.X+34, tpl.LeaguePanel.Y+424, tpl.LeaguePanel.W-74, 2, 0, tpl.AccentLine)
+	drawText(img, faces.Display, tpl.LeaguePanel.X+38, tpl.LeaguePanel.Y+502, tpl.TextPrimary, fmt.Sprintf("#%d", maxInt(1, data.Rank)))
+	drawRoundedImageFromURL(img, data.AvatarURL, tpl.LeaguePanel.X+98, tpl.LeaguePanel.Y+446, 64, 64, 14, rgba(72, 70, 75))
+	drawText(img, faces.SubTitle, tpl.LeaguePanel.X+180, tpl.LeaguePanel.Y+496, tpl.AccentGreen, trimText(faces.SubTitle, data.DisplayName, 220))
 
-	fillRoundedRect(img, 70, 1060, 960, 660, 34, rgbaA(35, 33, 37, 235))
-	drawText(img, faces.Title, 110, 1130, rgba(245, 245, 245), "Map Statistic")
-	fillRoundedRect(img, 100, 1180, 315, 260, 20, rgba(52, 50, 55))
-	drawProgressRing(img, 180, 1275, 58, 8, float64(data.WinRate)/100.0, rgba(93, 92, 96), rgba(55, 223, 146))
-	drawText(img, faces.Display, 246, 1272, rgba(55, 223, 146), fmt.Sprintf("%d%%", data.WinRate))
-	drawText(img, faces.SubTitle, 246, 1310, rgba(245, 245, 245), "Win Rate")
-	drawText(img, faces.SubTitle, 246, 1346, rgba(155, 155, 166), fmt.Sprintf("W = %d    L = %d", data.Wins, data.Losses))
-	drawHorizontalBar(img, 126, 1388, 240, 10, float64(data.WinRate)/100.0, rgba(72, 81, 91), rgba(55, 223, 146))
+	fillRoundedRect(img, tpl.MapsPanel.X, tpl.MapsPanel.Y, tpl.MapsPanel.W, tpl.MapsPanel.H, tpl.MapsPanel.R, tpl.PanelColor)
+	drawText(img, faces.Title, tpl.MapsPanel.X+40, tpl.MapsPanel.Y+70, tpl.TextPrimary, "Map Statistic")
+	fillRoundedRect(img, tpl.MapOverviewCard.X, tpl.MapOverviewCard.Y, tpl.MapOverviewCard.W, tpl.MapOverviewCard.H, tpl.MapOverviewCard.R, tpl.PanelDark)
+	drawProgressRing(img, tpl.MapOverviewCard.X+80, tpl.MapOverviewCard.Y+95, 58, 8, float64(data.WinRate)/100.0, rgba(93, 92, 96), tpl.AccentGreen)
+	drawText(img, faces.Display, tpl.MapOverviewCard.X+146, tpl.MapOverviewCard.Y+92, tpl.AccentGreen, fmt.Sprintf("%d%%", data.WinRate))
+	drawText(img, faces.SubTitle, tpl.MapOverviewCard.X+146, tpl.MapOverviewCard.Y+130, tpl.TextPrimary, "Win Rate")
+	drawText(img, faces.SubTitle, tpl.MapOverviewCard.X+146, tpl.MapOverviewCard.Y+166, tpl.TextMuted, fmt.Sprintf("W = %d    L = %d", data.Wins, data.Losses))
+	drawHorizontalBar(img, tpl.MapOverviewCard.X+26, tpl.MapOverviewCard.Y+208, 240, 10, float64(data.WinRate)/100.0, rgba(72, 81, 91), tpl.AccentGreen)
 
 	best := data.BestMap
-	fillRoundedRect(img, 100, 1460, 315, 220, 20, rgba(52, 50, 55))
-	drawText(img, faces.Title, 224, 1542, rgba(245, 245, 245), best.Name)
-	drawText(img, faces.SubTitle, 228, 1592, rgba(196, 196, 196), fmt.Sprintf("W = %d     L = %d", best.Wins, best.Losses))
-	drawText(img, faces.SubTitle, 228, 1634, rgba(196, 196, 196), fmt.Sprintf("K/D = %.2f", best.KD))
-	drawText(img, faces.SubTitle, 228, 1676, rgba(196, 196, 196), fmt.Sprintf("W/R = %d%%", best.WR))
+	fillRoundedRect(img, tpl.BestMapCard.X, tpl.BestMapCard.Y, tpl.BestMapCard.W, tpl.BestMapCard.H, tpl.BestMapCard.R, tpl.PanelDark)
+	drawText(img, faces.Title, tpl.BestMapCard.X+124, tpl.BestMapCard.Y+82, tpl.TextPrimary, best.Name)
+	drawText(img, faces.SubTitle, tpl.BestMapCard.X+128, tpl.BestMapCard.Y+132, rgba(196, 196, 196), fmt.Sprintf("W = %d     L = %d", best.Wins, best.Losses))
+	drawText(img, faces.SubTitle, tpl.BestMapCard.X+128, tpl.BestMapCard.Y+174, rgba(196, 196, 196), fmt.Sprintf("K/D = %.2f", best.KD))
+	drawText(img, faces.SubTitle, tpl.BestMapCard.X+128, tpl.BestMapCard.Y+216, rgba(196, 196, 196), fmt.Sprintf("W/R = %d%%", best.WR))
 
-	mapStartX := 430
-	mapStartY := 1180
+	mapStartX := tpl.MapGridX
+	mapStartY := tpl.MapGridY
 	for idx, card := range data.MapCards {
 		if idx >= 6 {
 			break
 		}
 		col := idx % 3
 		row := idx / 3
-		x := mapStartX + col*185
-		y := mapStartY + row*240
-		fillRoundedRect(img, x, y, 170, 220, 18, rgba(52, 50, 55))
-		drawText(img, faces.BodyBold, x+20, y+52, rgba(245, 245, 245), trimText(faces.BodyBold, card.Name, 130))
+		x := mapStartX + col*tpl.MapGridGapX
+		y := mapStartY + row*tpl.MapGridGapY
+		fillRoundedRect(img, x, y, tpl.MapGridW, tpl.MapGridH, 18, tpl.PanelDark)
+		drawText(img, faces.BodyBold, x+20, y+52, tpl.TextPrimary, trimText(faces.BodyBold, card.Name, 130))
 		drawText(img, faces.SubTitle, x+20, y+102, rgba(196, 196, 196), fmt.Sprintf("W = %d    L = %d", card.Wins, card.Losses))
 		drawText(img, faces.SubTitle, x+20, y+146, rgba(196, 196, 196), fmt.Sprintf("K/D = %.2f", card.KD))
 		drawText(img, faces.SubTitle, x+20, y+188, rgba(196, 196, 196), fmt.Sprintf("W/R = %d%%", card.WR))
 	}
 
-	fillRoundedRect(img, 1060, 1150, 470, 570, 34, rgbaA(35, 33, 37, 235))
-	drawText(img, faces.Title, 1188, 1230, rgba(245, 245, 245), "Recent Matches")
-	gridX, gridY := 1096, 1292
-	for idx := 0; idx < 25; idx++ {
-		col := idx % 5
-		row := idx / 5
-		x := gridX + col*78
-		y := gridY + row*78
+	fillRoundedRect(img, tpl.RecentPanel.X, tpl.RecentPanel.Y, tpl.RecentPanel.W, tpl.RecentPanel.H, tpl.RecentPanel.R, tpl.PanelColor)
+	drawText(img, faces.Title, tpl.RecentPanel.X+128, tpl.RecentPanel.Y+80, tpl.TextPrimary, "Recent Matches")
+	gridX, gridY := tpl.RecentGridX, tpl.RecentGridY
+	for idx := 0; idx < tpl.RecentCols*tpl.RecentRows; idx++ {
+		col := idx % tpl.RecentCols
+		row := idx / tpl.RecentCols
+		x := gridX + col*tpl.RecentGap
+		y := gridY + row*tpl.RecentGap
 		result := ""
 		if idx < len(data.RecentResults) {
 			result = data.RecentResults[idx]
@@ -976,9 +977,9 @@ func renderProfileCardPNG(s *discordgo.Session, guildID string, targetUser *disc
 			boxColor = rgba(92, 27, 41)
 			textColor = rgba(255, 96, 122)
 		}
-		fillRoundedRect(img, x, y, 64, 64, 10, boxColor)
+		fillRoundedRect(img, x, y, tpl.RecentCell, tpl.RecentCell, 10, boxColor)
 		if result != "" {
-			drawCenteredText(img, faces.BodyBold, x+32, y+42, textColor, result)
+			drawCenteredText(img, faces.BodyBold, x+tpl.RecentCell/2, y+42, textColor, result)
 		}
 		}
 
@@ -1131,116 +1132,118 @@ func buildPickCardData(s *discordgo.Session, state *PickBanState, mapInfo MapInf
 func renderPickCardPNG(s *discordgo.Session, state *PickBanState, mapInfo MapInfo) ([]byte, error) {
 	data := buildPickCardData(s, state, mapInfo)
 	faces := loadCardFaces()
+	tpl := DefaultPickCardTemplate
 
-	W, H := 1600, 900
+	W, H := tpl.CanvasW, tpl.CanvasH
 	img := image.NewRGBA(image.Rect(0, 0, W, H))
 
 	// Background
-	fillGradient(img, 0, 0, W, H, rgba(42, 8, 60), rgba(8, 55, 10), false)
+	fillGradient(img, 0, 0, W, H, tpl.BackgroundLeft, tpl.BackgroundRight, false)
 
 	// Left panel — CT (purple)
-	fillRoundedRect(img, 10, 10, 490, H-20, 24, rgbaA(70, 20, 90, 230))
-	drawText(img, faces.Small, 28, 44, rgba(190, 180, 200), "Counter-Terrorists")
-	fillRoundedRect(img, 28, 54, 70, 70, 14, rgba(50, 30, 65))
+	fillRoundedRect(img, tpl.LeftPanel.X, tpl.LeftPanel.Y, tpl.LeftPanel.W, tpl.LeftPanel.H, tpl.LeftPanel.R, tpl.CTPanelColor)
+	drawText(img, faces.Small, tpl.LeftPanel.X+18, tpl.LeftPanel.Y+34, tpl.SoftCT, "Counter-Terrorists")
+	fillRoundedRect(img, tpl.LeftPanel.X+18, tpl.LeftPanel.Y+44, 70, 70, 14, rgba(50, 30, 65))
 
 	ctCapName := data.CTCaptain
 	if ctCapName == "" && len(data.CTPlayers) > 0 { ctCapName = data.CTPlayers[0].Name }
-	drawText(img, faces.Title, 112, 92, rgba(245, 245, 245), trimText(faces.Title, ctCapName, 320))
+	drawText(img, faces.Title, tpl.LeftPanel.X+102, tpl.LeftPanel.Y+82, tpl.TextPrimary, trimText(faces.Title, ctCapName, 320))
 	ctWinStr := fmt.Sprintf("%d%%", data.WinPctCT)
 	ctEloStr := fmt.Sprintf("%d", data.CTElo)
-	drawText(img, faces.Small, 112, 118, rgba(170, 160, 180), "Victory %")
-	drawText(img, faces.BodyBold, 220, 118, rgba(245, 245, 245), ctWinStr)
-	drawText(img, faces.Small, 300, 118, rgba(170, 160, 180), "ELO")
-	drawText(img, faces.BodyBold, 345, 118, rgba(195, 71, 255), ctEloStr)
-	drawRoundedImageFromURL(img, data.HostAvatar, 28, 54, 70, 70, 14, rgba(70, 50, 85))
+	drawText(img, faces.Small, tpl.LeftPanel.X+102, tpl.LeftPanel.Y+108, tpl.SoftCT, "Victory %")
+	drawText(img, faces.BodyBold, tpl.LeftPanel.X+210, tpl.LeftPanel.Y+108, tpl.TextPrimary, ctWinStr)
+	drawText(img, faces.Small, tpl.LeftPanel.X+290, tpl.LeftPanel.Y+108, tpl.SoftCT, "ELO")
+	drawText(img, faces.BodyBold, tpl.LeftPanel.X+335, tpl.LeftPanel.Y+108, tpl.CTAccent, ctEloStr)
+	drawRoundedImageFromURL(img, data.HostAvatar, tpl.LeftPanel.X+18, tpl.LeftPanel.Y+44, 70, 70, 14, rgba(70, 50, 85))
 
 	for idx, p := range data.CTPlayers {
-		y := 165 + idx*120
-		if y+110 > H-20 { break }
-		fillRoundedRect(img, 20, y, 470, 108, 18, rgbaA(55, 25, 70, 220))
-		drawRoundedImageFromURL(img, p.AvatarURL, 32, y+16, 72, 72, 14, rgba(70, 50, 85))
-		drawText(img, faces.Small, 118, y+34, rgba(190, 180, 200), "Team")
-		drawText(img, faces.BodyBold, 118, y+62, rgba(245, 245, 245), trimText(faces.BodyBold, p.Name, 230))
-		drawText(img, faces.Tiny, 118, y+88, rgba(140, 130, 155), fmt.Sprintf("Matches %d", p.Matches))
-		drawText(img, faces.Tiny, 220, y+88, rgba(140, 130, 155), fmt.Sprintf("K/D %.2f", p.KD))
-		drawText(img, faces.Tiny, 328, y+88, rgba(140, 130, 155), fmt.Sprintf("AVG %.0f", p.Avg))
+		y := tpl.SideCardTop + idx*tpl.SideCardGap
+		if y+tpl.SideCardH > H-20 { break }
+		fillRoundedRect(img, tpl.LeftPanel.X+tpl.SideCardXPad, y, tpl.SideCardW, tpl.SideCardH, 18, rgbaA(55, 25, 70, 220))
+		drawRoundedImageFromURL(img, p.AvatarURL, tpl.LeftPanel.X+tpl.SideCardXPad+12, y+16, 72, 72, 14, rgba(70, 50, 85))
+		textX := tpl.LeftPanel.X + tpl.SideCardXPad + 98
+		drawText(img, faces.Small, textX, y+34, tpl.SoftCT, "Team")
+		drawText(img, faces.BodyBold, textX, y+62, tpl.TextPrimary, trimText(faces.BodyBold, p.Name, 230))
+		drawText(img, faces.Tiny, textX, y+88, rgba(140, 130, 155), fmt.Sprintf("Matches %d", p.Matches))
+		drawText(img, faces.Tiny, textX+102, y+88, rgba(140, 130, 155), fmt.Sprintf("K/D %.2f", p.KD))
+		drawText(img, faces.Tiny, textX+210, y+88, rgba(140, 130, 155), fmt.Sprintf("AVG %.0f", p.Avg))
 	}
 
 	// Right panel — T (green)
-	fillRoundedRect(img, W-500, 10, 490, H-20, 24, rgbaA(10, 60, 15, 230))
-	drawRightText(img, faces.Small, W-28, 44, rgba(170, 200, 170), "Terrorists")
+	fillRoundedRect(img, tpl.RightPanel.X, tpl.RightPanel.Y, tpl.RightPanel.W, tpl.RightPanel.H, tpl.RightPanel.R, tpl.TPanelColor)
+	drawRightText(img, faces.Small, tpl.RightPanel.X+tpl.RightPanel.W-18, tpl.RightPanel.Y+34, tpl.SoftT, "Terrorists")
 	tCapName := data.TCaptain
 	if tCapName == "" && len(data.TPlayers) > 0 { tCapName = data.TPlayers[0].Name }
-	drawRightText(img, faces.Title, W-28, 92, rgba(245, 245, 245), trimText(faces.Title, tCapName, 320))
+	drawRightText(img, faces.Title, tpl.RightPanel.X+tpl.RightPanel.W-18, tpl.RightPanel.Y+82, tpl.TextPrimary, trimText(faces.Title, tCapName, 320))
 	tWinStr := fmt.Sprintf("%d%%", data.WinPctT)
 	tEloStr := fmt.Sprintf("%d", data.TElo)
-	drawRightText(img, faces.Small, W-180, 118, rgba(170, 200, 170), "ELO")
-	drawRightText(img, faces.BodyBold, W-120, 118, rgba(55, 200, 100), tEloStr)
-	drawRightText(img, faces.Small, W-290, 118, rgba(170, 200, 170), "Victory %")
-	drawRightText(img, faces.BodyBold, W-230, 118, rgba(245, 245, 245), tWinStr)
-	if len(data.TPlayers) > 0 { drawRoundedImageFromURL(img, data.TPlayers[0].AvatarURL, W-98, 54, 70, 70, 14, rgba(10, 70, 20)) }
+	drawRightText(img, faces.Small, tpl.RightPanel.X+tpl.RightPanel.W-170, tpl.RightPanel.Y+108, tpl.SoftT, "ELO")
+	drawRightText(img, faces.BodyBold, tpl.RightPanel.X+tpl.RightPanel.W-110, tpl.RightPanel.Y+108, tpl.TAccent, tEloStr)
+	drawRightText(img, faces.Small, tpl.RightPanel.X+tpl.RightPanel.W-280, tpl.RightPanel.Y+108, tpl.SoftT, "Victory %")
+	drawRightText(img, faces.BodyBold, tpl.RightPanel.X+tpl.RightPanel.W-220, tpl.RightPanel.Y+108, tpl.TextPrimary, tWinStr)
+	if len(data.TPlayers) > 0 { drawRoundedImageFromURL(img, data.TPlayers[0].AvatarURL, tpl.RightPanel.X+tpl.RightPanel.W-88, tpl.RightPanel.Y+44, 70, 70, 14, rgba(10, 70, 20)) }
 
 	for idx, p := range data.TPlayers {
-		y := 165 + idx*120
-		if y+110 > H-20 { break }
-		fillRoundedRect(img, W-490, y, 470, 108, 18, rgbaA(15, 65, 20, 220))
-		drawRoundedImageFromURL(img, p.AvatarURL, W-490+12, y+16, 72, 72, 14, rgba(10, 70, 20))
-		drawText(img, faces.Small, W-490+98, y+34, rgba(170, 200, 170), "Team")
-		drawText(img, faces.BodyBold, W-490+98, y+62, rgba(245, 245, 245), trimText(faces.BodyBold, p.Name, 230))
-		drawText(img, faces.Tiny, W-490+98, y+88, rgba(130, 155, 135), fmt.Sprintf("Matches %d", p.Matches))
-		drawText(img, faces.Tiny, W-490+200, y+88, rgba(130, 155, 135), fmt.Sprintf("K/D %.2f", p.KD))
-		drawText(img, faces.Tiny, W-490+308, y+88, rgba(130, 155, 135), fmt.Sprintf("AVG %.0f", p.Avg))
+		y := tpl.SideCardTop + idx*tpl.SideCardGap
+		if y+tpl.SideCardH > H-20 { break }
+		fillRoundedRect(img, tpl.RightPanel.X+10, y, tpl.SideCardW, tpl.SideCardH, 18, rgbaA(15, 65, 20, 220))
+		drawRoundedImageFromURL(img, p.AvatarURL, tpl.RightPanel.X+22, y+16, 72, 72, 14, rgba(10, 70, 20))
+		drawText(img, faces.Small, tpl.RightPanel.X+108, y+34, tpl.SoftT, "Team")
+		drawText(img, faces.BodyBold, tpl.RightPanel.X+108, y+62, tpl.TextPrimary, trimText(faces.BodyBold, p.Name, 230))
+		drawText(img, faces.Tiny, tpl.RightPanel.X+108, y+88, rgba(130, 155, 135), fmt.Sprintf("Matches %d", p.Matches))
+		drawText(img, faces.Tiny, tpl.RightPanel.X+210, y+88, rgba(130, 155, 135), fmt.Sprintf("K/D %.2f", p.KD))
+		drawText(img, faces.Tiny, tpl.RightPanel.X+318, y+88, rgba(130, 155, 135), fmt.Sprintf("AVG %.0f", p.Avg))
 	}
 
 	// Center panel
-	centerX := 505
-	centerW := W - 500 - centerX
-	fillRoundedRect(img, centerX, 10, centerW, H-20, 24, rgbaA(28, 28, 32, 240))
+	centerX := tpl.CenterPanel.X
+	centerW := tpl.CenterPanel.W
+	fillRoundedRect(img, tpl.CenterPanel.X, tpl.CenterPanel.Y, tpl.CenterPanel.W, tpl.CenterPanel.H, tpl.CenterPanel.R, tpl.CenterPanelColor)
 
 	// Map header
-	drawCenteredText(img, faces.Small, centerX+centerW/2, 48, rgba(190, 190, 195), "Map")
-	drawCenteredText(img, faces.Title, centerX+centerW/2, 86, rgba(245, 245, 245), data.MapName)
+	drawCenteredText(img, faces.Small, centerX+centerW/2, tpl.CenterHeaderY, tpl.TextMuted, "Map")
+	drawCenteredText(img, faces.Title, centerX+centerW/2, tpl.CenterMapY, tpl.TextPrimary, data.MapName)
 
 	// ELITE FPL logo text center
-	drawCenteredText(img, faces.BodyBold, centerX+centerW/2, 128, rgba(190, 71, 255), "ELITE")
-	drawCenteredText(img, faces.BodyBold, centerX+centerW/2, 152, rgba(55, 200, 100), "FPL")
+	drawCenteredText(img, faces.BodyBold, centerX+centerW/2, tpl.CenterBadgeY-24, tpl.CTAccent, "ELITE")
+	drawCenteredText(img, faces.BodyBold, centerX+centerW/2, tpl.CenterBadgeY, tpl.TAccent, "FPL")
 
 	// League + format
 	leagueShort := strings.TrimPrefix(strings.TrimPrefix(data.Category, "🔴 | "), "🟣 | ")
 	leagueShort = strings.TrimPrefix(strings.TrimPrefix(leagueShort, "🟢 | "), "⚪ | ")
-	fillRoundedRect(img, centerX+20, 180, centerW-40, 60, 18, rgba(44, 44, 50))
-	drawCenteredText(img, faces.Body, centerX+centerW/2-80, 218, rgba(245, 245, 245), leagueShort)
-	drawText(img, faces.BodyBold, centerX+centerW/2+10, 218, rgba(195, 71, 255), "BO")
-	drawText(img, faces.BodyBold, centerX+centerW/2+45, 218, rgba(245, 245, 245), "Best of 1")
+	fillRoundedRect(img, tpl.MetaStrip.X, tpl.MetaStrip.Y, tpl.MetaStrip.W, tpl.MetaStrip.H, tpl.MetaStrip.R, tpl.InnerPanelColor)
+	drawCenteredText(img, faces.Body, centerX+centerW/2-80, tpl.MetaStrip.Y+38, tpl.TextPrimary, leagueShort)
+	drawText(img, faces.BodyBold, centerX+centerW/2+10, tpl.MetaStrip.Y+38, tpl.CTAccent, "BO")
+	drawText(img, faces.BodyBold, centerX+centerW/2+45, tpl.MetaStrip.Y+38, tpl.TextPrimary, "Best of 1")
 
 	// Host block
-	fillRoundedRect(img, centerX+20, 258, centerW-40, 110, 18, rgba(44, 44, 50))
-	drawRoundedImageFromURL(img, data.HostAvatar, centerX+36, 274, 72, 72, 14, rgba(80, 70, 90))
-	drawText(img, faces.Small, centerX+120, 300, rgba(190, 190, 195), "Host")
-	drawText(img, faces.SubTitle, centerX+120, 332, rgba(245, 245, 245), trimText(faces.SubTitle, data.HostName, 180))
+	fillRoundedRect(img, tpl.HostCard.X, tpl.HostCard.Y, tpl.HostCard.W, tpl.HostCard.H, tpl.HostCard.R, tpl.InnerPanelColor)
+	drawRoundedImageFromURL(img, data.HostAvatar, tpl.HostCard.X+16, tpl.HostCard.Y+16, 72, 72, 14, rgba(80, 70, 90))
+	drawText(img, faces.Small, tpl.HostCard.X+100, tpl.HostCard.Y+42, tpl.TextMuted, "Host")
+	drawText(img, faces.SubTitle, tpl.HostCard.X+100, tpl.HostCard.Y+74, tpl.TextPrimary, trimText(faces.SubTitle, data.HostName, 180))
 	hostIDStr := data.HostGameID
 	if hostIDStr == "" { hostIDStr = "—" }
-	drawText(img, faces.Small, centerX+120+textWidth(faces.SubTitle, trimText(faces.SubTitle, data.HostName, 180))+16, 300, rgba(140, 140, 150), "ID")
-	drawText(img, faces.SubTitle, centerX+120+textWidth(faces.SubTitle, trimText(faces.SubTitle, data.HostName, 180))+36, 332, rgba(190, 190, 195), hostIDStr)
-	drawText(img, faces.Tiny, centerX+36, 358, rgba(140, 140, 150), "ℹ Хост создаёт лобби в игре")
+	drawText(img, faces.Small, tpl.HostCard.X+280, tpl.HostCard.Y+42, rgba(140, 140, 150), "ID")
+	drawText(img, faces.SubTitle, tpl.HostCard.X+316, tpl.HostCard.Y+74, rgba(190, 190, 195), hostIDStr)
+	drawText(img, faces.Tiny, tpl.HostCard.X+16, tpl.HostCard.Y+100, rgba(140, 140, 150), "ℹ Хост создаёт лобби в игре")
 
 	// ELO bar
-	fillRoundedRect(img, centerX+20, 388, centerW-40, 90, 18, rgba(44, 44, 50))
-	barX := centerX + 24
-	barW := centerW - 48
-	drawText(img, faces.SubTitle, barX, 420, rgba(195, 71, 255), fmt.Sprintf("%d", data.CTElo))
-	drawRightText(img, faces.SubTitle, barX+barW, 420, rgba(55, 200, 100), fmt.Sprintf("%d", data.TElo))
-	drawCenteredText(img, faces.Small, centerX+centerW/2, 420, rgba(190, 190, 195), "ELO")
-	barY := 432
+	fillRoundedRect(img, tpl.EloCard.X, tpl.EloCard.Y, tpl.EloCard.W, tpl.EloCard.H, tpl.EloCard.R, tpl.InnerPanelColor)
+	barX := tpl.EloCard.X + 4
+	barW := tpl.EloCard.W - 8
+	drawText(img, faces.SubTitle, barX, tpl.EloCard.Y+32, tpl.CTAccent, fmt.Sprintf("%d", data.CTElo))
+	drawRightText(img, faces.SubTitle, barX+barW, tpl.EloCard.Y+32, tpl.TAccent, fmt.Sprintf("%d", data.TElo))
+	drawCenteredText(img, faces.Small, centerX+centerW/2, tpl.EloCard.Y+32, tpl.TextMuted, "ELO")
+	barY := tpl.EloCard.Y + 44
 	barH := 18
-	fillRoundedRect(img, barX, barY, barW, barH, barH/2, rgba(55, 200, 100))
+	fillRoundedRect(img, barX, barY, barW, barH, barH/2, tpl.TAccent)
 	ctBarW := barW * data.WinPctCT / 100
 	if ctBarW < 8 { ctBarW = 8 }
-	fillRoundedRect(img, barX, barY, ctBarW, barH, barH/2, rgba(195, 71, 255))
+	fillRoundedRect(img, barX, barY, ctBarW, barH, barH/2, tpl.CTAccent)
 	drawText(img, faces.Tiny, barX, barY+barH+18, rgba(140, 140, 150), "ℹ Играется строго эта карта")
 
 	// Players count
-	drawCenteredText(img, faces.Body, centerX+centerW/2, 488, rgba(190, 190, 195), fmt.Sprintf("5vs5 · Матч #%d", data.MatchID))
+	drawCenteredText(img, faces.Body, centerX+centerW/2, tpl.FooterNoteY, tpl.TextMuted, fmt.Sprintf("5vs5 · Матч #%d", data.MatchID))
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
